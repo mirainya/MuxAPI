@@ -260,6 +260,7 @@ func NewExchange(source, target Format, model string, stream bool, original []by
 	exchange.UpstreamStream = stream || (exchange.Translated() && (target == Claude || target == Codex))
 	if !exchange.Translated() {
 		exchange.UpstreamRequest = append([]byte(nil), original...)
+		sanitizeDeferredTools(exchange)
 		return exchange, nil
 	}
 	exchange.sdkSource = resolveSDKSource(exchange.registry, source, target)
@@ -287,6 +288,7 @@ func NewExchange(source, target Format, model string, stream bool, original []by
 		return nil, fmt.Errorf("translate request %s -> %s: invalid JSON", source, target)
 	}
 	exchange.UpstreamRequest = translated
+	sanitizeDeferredTools(exchange)
 	return exchange, nil
 }
 
