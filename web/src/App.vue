@@ -2768,15 +2768,38 @@ function logout() {
         <template v-else-if="page === 'settings'">
           <div class="settings-layout">
             <aside class="settings-nav">
-              <button type="button" class="set-navitem" :class="{ active: settingsSection === 'logs' }" @click="gotoSection('logs')"><Icon name="refresh" :size="16" />日志清理</button>
-              <button type="button" class="set-navitem" :class="{ active: settingsSection === 'route' }" @click="gotoSection('route')"><Icon name="link" :size="16" />渠道路由</button>
-              <button type="button" class="set-navitem" :class="{ active: settingsSection === 'alert' }" @click="gotoSection('alert')"><Icon name="alert" :size="16" />健康告警</button>
-              <button type="button" class="set-navitem" :class="{ active: settingsSection === 'endpoint' }" @click="gotoSection('endpoint')"><Icon name="link" :size="16" />接入地址</button>
-              <button type="button" class="set-navitem" :class="{ active: settingsSection === 'backup' }" @click="gotoSection('backup')"><Icon name="refresh" :size="16" />数据备份</button>
-              <button type="button" class="set-navitem" :class="{ active: settingsSection === 'mappings' }" @click="gotoSection('mappings')"><Icon name="link" :size="16" />模型映射</button>
-              <p class="set-navhint">探测间隔 / 路径已下放到各监控项，在「监控看板」逐项配置。</p>
+              <div class="settings-nav-head">
+                <span class="settings-nav-kicker"><i></i>CONTROL CENTER</span>
+                <strong>设置中心</strong>
+                <small>运行策略与数据工具</small>
+              </div>
+              <nav class="settings-nav-list" aria-label="设置分类">
+                <button type="button" class="set-navitem" :class="{ active: settingsSection === 'logs' }" @click="gotoSection('logs')">
+                  <span class="set-navicon"><Icon name="refresh" :size="16" /></span><span class="set-navcopy"><strong>日志清理</strong><small>记录保存</small></span><Icon class="set-navarrow" name="chevron-right" :size="14" />
+                </button>
+                <button type="button" class="set-navitem" :class="{ active: settingsSection === 'route' }" @click="gotoSection('route')">
+                  <span class="set-navicon"><Icon name="link" :size="16" /></span><span class="set-navcopy"><strong>渠道路由</strong><small>失败切换</small></span><Icon class="set-navarrow" name="chevron-right" :size="14" />
+                </button>
+                <button type="button" class="set-navitem" :class="{ active: settingsSection === 'alert' }" @click="gotoSection('alert')">
+                  <span class="set-navicon"><Icon name="alert" :size="16" /></span><span class="set-navcopy"><strong>健康告警</strong><small>Webhook 通知</small></span><Icon class="set-navarrow" name="chevron-right" :size="14" />
+                </button>
+                <button type="button" class="set-navitem" :class="{ active: settingsSection === 'endpoint' }" @click="gotoSection('endpoint')">
+                  <span class="set-navicon"><Icon name="external-link" :size="16" /></span><span class="set-navcopy"><strong>接入地址</strong><small>客户端入口</small></span><Icon class="set-navarrow" name="chevron-right" :size="14" />
+                </button>
+                <button type="button" class="set-navitem" :class="{ active: settingsSection === 'backup' }" @click="gotoSection('backup')">
+                  <span class="set-navicon"><Icon name="server" :size="16" /></span><span class="set-navcopy"><strong>数据备份</strong><small>S3 / R2 存储</small></span><Icon class="set-navarrow" name="chevron-right" :size="14" />
+                </button>
+                <button type="button" class="set-navitem" :class="{ active: settingsSection === 'mappings' }" @click="gotoSection('mappings')">
+                  <span class="set-navicon"><Icon name="link" :size="16" /></span><span class="set-navcopy"><strong>模型映射</strong><small>名称转换</small></span><Icon class="set-navarrow" name="chevron-right" :size="14" />
+                </button>
+              </nav>
+              <div class="set-navhint"><Icon name="alert" :size="14" /><span>探测间隔与路径已下放到「监控看板」逐项配置。</span></div>
             </aside>
             <div class="settings-body">
+              <header class="settings-body-head">
+                <div><span class="settings-body-kicker">RUNTIME CONFIGURATION</span><h2>运行设置</h2><p>修改后的参数会即时应用到新的请求。</p></div>
+                <span class="settings-live"><i></i>实时生效</span>
+              </header>
               <section id="set-logs" v-show="settingsSection === 'logs'" class="card settings-card">
                 <div class="settings-title"><h3>日志清理</h3><p>按完成时间保留请求记录；设为 0 可永久保留完整路由与计费历史。</p></div>
                 <div class="settings-fields">
@@ -2917,18 +2940,17 @@ function logout() {
 
               <!-- 模型映射 -->
               <section id="set-mappings" v-show="settingsSection === 'mappings'" class="card settings-card">
-                <div class="settings-title"><h3>模型映射</h3><p>管理请求模型名到上游实际模型名的映射规则。自动学习的映射由前缀匹配产生,可手动覆盖或删除。</p></div>
-                <div class="settings-actions" style="margin-bottom:12px">
+                <div class="settings-title"><h3>模型映射</h3><p>管理请求模型名到上游实际模型名的映射规则。自动学习的映射由前缀匹配产生，可手动覆盖或删除。</p></div>
+                <div class="settings-actions mapping-actions">
                   <button class="btn btn-sm" @click="loadMappings"><Icon name="refresh" :size="14" />刷新</button>
                   <button class="btn btn-sm" @click="showNewMapping = true"><Icon name="plus" :size="14" />手动添加</button>
                 </div>
                 <div v-if="showNewMapping" class="mapping-form">
                   <FancySelect v-model="newMappingForm.upstream_id" :options="upstreamSelectOptions" />
                   <input v-model="newMappingForm.source_model" placeholder="请求模型名" />
-                  <span style="color:var(--g400)">→</span>
+                  <span class="mapping-arrow"><Icon name="chevron-right" :size="15" /></span>
                   <input v-model="newMappingForm.target_model" placeholder="上游实际模型名" />
-                  <button class="btn btn-sm" @click="saveNewMapping">保存</button>
-                  <button class="btn btn-ghost btn-sm" @click="showNewMapping = false">取消</button>
+                  <div class="mapping-form-actions"><button class="btn btn-sm" @click="saveNewMapping">保存</button><button class="btn btn-ghost btn-sm" @click="showNewMapping = false">取消</button></div>
                 </div>
                 <div v-if="!mappings.length && !mappingsLoading" class="hint">暂无模型映射规则</div>
                 <div v-else-if="mappingsLoading" class="hint">加载中…</div>
@@ -2939,11 +2961,11 @@ function logout() {
                       <tr v-for="m in mappings" :key="m.id">
                         <td>{{ upName(m.upstream_id) }}</td>
                         <td><code>{{ m.source_model }}</code></td>
-                        <td style="color:var(--g400)">→</td>
+                        <td class="mapping-table-arrow"><Icon name="chevron-right" :size="13" /></td>
                         <td><code>{{ m.target_model }}</code></td>
                         <td><span class="tag" :class="m.mapping_type === 'auto' ? 'on' : ''">{{ m.mapping_type === 'auto' ? '自动' : '手动' }}</span></td>
-                        <td style="font-size:11px;color:var(--g400)">{{ m.expires_at ? new Date(m.expires_at).toLocaleDateString() : '永久' }}</td>
-                        <td><button class="icon-btn danger" @click="guard(async () => { await api.deleteModelMapping(m.id); await loadMappings() })"><Icon name="trash" :size="16" /></button></td>
+                        <td class="mapping-expiry">{{ m.expires_at ? new Date(m.expires_at).toLocaleDateString() : '永久' }}</td>
+                        <td><button class="icon-btn danger" title="删除映射" @click="guard(async () => { await api.deleteModelMapping(m.id); await loadMappings() })"><Icon name="trash" :size="16" /></button></td>
                       </tr>
                     </tbody>
                   </table>
