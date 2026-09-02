@@ -129,12 +129,11 @@ func IsFailureStatus(code int) bool {
 		return true
 	}
 	switch code {
-	case http.StatusUnauthorized,         // 401
-		http.StatusPaymentRequired,       // 402
-		http.StatusForbidden,             // 403
-		http.StatusRequestTimeout,        // 408
-		http.StatusUnprocessableEntity,   // 422 — upstream token limit / malformed by proxy
-		http.StatusTooManyRequests:       // 429
+	case http.StatusUnauthorized, // 401
+		http.StatusPaymentRequired, // 402
+		http.StatusForbidden,       // 403
+		http.StatusRequestTimeout,  // 408
+		http.StatusTooManyRequests: // 429
 		return true
 	}
 	return false

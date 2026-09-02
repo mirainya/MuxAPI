@@ -408,7 +408,7 @@ func (s *Store) listModelPricing(models []string) (map[string]ModelPricing, erro
 		return prices, nil
 	}
 	placeholders := strings.TrimRight(strings.Repeat("?,", len(candidates)), ",")
-	rows, err := s.sqlDB.Query(`SELECT model,input_cost_per_token,output_cost_per_token,
+	rows, err := s.query(`SELECT model,input_cost_per_token,output_cost_per_token,
 		cache_read_input_token_cost,cache_creation_input_token_cost
 		FROM model_pricing WHERE model IN (`+placeholders+`)`, stringSliceToAny(candidates)...)
 	if err != nil {

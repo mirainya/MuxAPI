@@ -104,7 +104,7 @@ type UpstreamRoutingStats struct {
 // proxied upstreams that only cache a portion of the prefix.
 func (s *Store) CacheCoverageRatio(upstreamID int64) (float64, error) {
 	var ratio float64
-	err := s.queryRow(`SELECT AVG(cached_tokens::float / NULLIF(cached_tokens + input_tokens + cache_creation_tokens, 0))
+	err := s.queryRow(`SELECT AVG(CAST(cached_tokens AS REAL) / NULLIF(cached_tokens + input_tokens + cache_creation_tokens, 0))
 		FROM (SELECT cached_tokens, input_tokens, cache_creation_tokens
 			FROM request_attempts WHERE upstream_id=? AND status=200 AND cached_tokens > 0
 			ORDER BY id DESC LIMIT 50) sub`, upstreamID).Scan(&ratio)
@@ -122,7 +122,7 @@ func (s *Store) CacheCoverageRatio(upstreamID int64) (float64, error) {
 // meaningful (> 1024).
 func (s *Store) TokenInflationFactor(upstreamID int64) (float64, error) {
 	var factor float64
-	err := s.queryRow(`SELECT AVG((input_tokens + cached_tokens + cache_creation_tokens)::float / prefix_tokens)
+	err := s.queryRow(`SELECT AVG(CAST(input_tokens + cached_tokens + cache_creation_tokens AS REAL) / prefix_tokens)
 		FROM (SELECT input_tokens, cached_tokens, cache_creation_tokens, prefix_tokens
 			FROM routing_observations
 			WHERE upstream_id=? AND prefix_tokens > 1024 AND (cached_tokens > 0 OR cache_creation_tokens > 0)

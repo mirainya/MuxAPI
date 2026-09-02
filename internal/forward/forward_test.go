@@ -656,6 +656,46 @@ func TestForwardModelUnsupportedFailover(t *testing.T) {
 	}
 }
 
+func TestForwardClientErrorsDoNotFailOver(t *testing.T) {
+	for _, status := range []int{http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var backupHits atomic.Int32
+			primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				io.WriteString(w, `{"error":{"message":"invalid client request"}}`)
+			}))
+			defer primary.Close()
+			backup := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				backupHits.Add(1)
+				io.WriteString(w, `{"ok":true}`)
+			}))
+			defer backup.Close()
+
+			upstreams := []*upstream.Upstream{
+				{ID: 1, BaseURL: primary.URL, APIKey: "k", Priority: 1, Weight: 1},
+				{ID: 2, BaseURL: backup.URL, APIKey: "k", Priority: 2, Weight: 1},
+			}
+			hm := health.New(1, time.Hour)
+			fwd := New(scheduler.New(func(int64) []*upstream.Upstream { return upstreams }, hm), hm, 2)
+			body := []byte(`{"model":"gpt-5.6"}`)
+			recorder := httptest.NewRecorder()
+			result := fwd.Forward(recorder,
+				httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body)), body, 1, "")
+
+			if recorder.Code != status || result.Status != status || result.Outcome != OutcomeClientError {
+				t.Fatalf("status=%d result=%+v", recorder.Code, result)
+			}
+			if backupHits.Load() != 0 {
+				t.Fatalf("client error %d must not reach backup", status)
+			}
+			if hm.EffectiveState(1) != "CLOSED" {
+				t.Fatalf("client error %d must not open primary breaker", status)
+			}
+		})
+	}
+}
+
 func TestForwardPreservesQuery(t *testing.T) {
 	queries := make(chan string, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

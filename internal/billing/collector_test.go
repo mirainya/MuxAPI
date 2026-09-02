@@ -97,9 +97,8 @@ func TestFetchNewAPI(t *testing.T) {
 		result.ReportedActualCost == nil || math.Abs(*result.ReportedActualCost-5.728422) > 0.000001 {
 		t.Fatalf("unexpected New API result: %+v", result)
 	}
-	expectedListCost := *result.ReportedActualCost / *result.EffectiveMultiplier
-	if result.ReportedListCost == nil || math.Abs(*result.ReportedListCost-expectedListCost) > 0.000001 {
-		t.Fatalf("ReportedListCost should be actual/multiplier: got %v, want %v", result.ReportedListCost, expectedListCost)
+	if result.ReportedListCost != nil {
+		t.Fatalf("New API does not report list cost; derived values would hide overcharge: %v", *result.ReportedListCost)
 	}
 }
 
@@ -175,6 +174,37 @@ func TestFetchNewAPIUserGroupRatioOverridesEffective(t *testing.T) {
 	}
 	if result.EffectiveMultiplier == nil || *result.EffectiveMultiplier != 0.08 {
 		t.Fatalf("effective must reflect the personal discount 0.08, got %v", result.EffectiveMultiplier)
+	}
+}
+
+func TestFetchNewAPISkipsErrorLogBeforePersonalRatio(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/usage/token/":
+			w.Write([]byte(`{"data":{"object":"token_usage","total_used":100,"unlimited_quota":true}}`))
+		case "/api/status":
+			w.Write([]byte(`{"data":{"quota_per_unit":500000}}`))
+		case "/api/log/token":
+			w.Write([]byte(`{"success":true,"data":[
+				{"group":"vip","other":"{\"error_code\":\"upstream_error\",\"status_code\":503}"},
+				{"group":"vip","other":"{\"group_ratio\":0.22,\"user_group_ratio\":0.08}"}
+			]}`))
+		case "/api/user/groups":
+			w.Write([]byte(`{"success":true,"data":{"vip":{"ratio":0.22}}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	result, err := Fetch(context.Background(), &upstream.Upstream{
+		BaseURL: server.URL, BillingType: upstream.BillingNewAPI,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.EffectiveMultiplier == nil || *result.EffectiveMultiplier != 0.08 {
+		t.Fatalf("effective must come from the latest charged log, got %v", result.EffectiveMultiplier)
 	}
 }
 

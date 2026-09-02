@@ -44,10 +44,12 @@ func TestIsFailureStatus(t *testing.T) {
 	}
 	// 不应触发切换的状态码（成功 / 客户端请求本身的问题，透传给客户端）
 	pass := []int{
-		http.StatusOK,         // 200
-		http.StatusCreated,    // 201
-		http.StatusBadRequest, // 400 请求畸形
-		http.StatusNotFound,   // 404 模型/路径不存在
+		http.StatusOK,                    // 200
+		http.StatusCreated,               // 201
+		http.StatusBadRequest,            // 400 请求畸形/上下文超限
+		http.StatusRequestEntityTooLarge, // 413 请求体过大
+		http.StatusUnprocessableEntity,   // 422 请求参数无法处理
+		http.StatusNotFound,              // 404 模型/路径不存在
 	}
 	for _, c := range pass {
 		if IsFailureStatus(c) {

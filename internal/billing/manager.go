@@ -160,7 +160,11 @@ func (m *Manager) Refresh(ctx context.Context, upstreamID int64) (store.BillingS
 	if err != nil {
 		return store.BillingStatus{}, err
 	}
-	return m.refreshItem(ctx, item)
+	state, err := m.refreshItem(ctx, item)
+	if errors.Is(err, ErrRateLimited) {
+		m.markRateLimited(item)
+	}
+	return state, err
 }
 
 // RefreshAll updates every configured billing upstream with a bounded worker pool.

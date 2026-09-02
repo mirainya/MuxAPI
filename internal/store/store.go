@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,6 +15,7 @@ import (
 
 	"github.com/glebarez/sqlite"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/mirainya/muxapi/database/migrations"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -111,8 +112,8 @@ type OpenOptions struct {
 	ReadOnly bool
 }
 
-// Open 根据连接串选择数据库，通过 GORM AutoMigrate 管理 schema。
-// 设置环境变量 MUXAPI_SKIP_MIGRATE=1 跳过 AutoMigrate（用于已有数据库）。
+// Open 根据连接串选择数据库。PostgreSQL 使用版本化迁移，SQLite 使用
+// GORM AutoMigrate 创建测试和本地开发所需的 schema。
 func Open(databaseURL string) (*Store, error) {
 	return OpenWithOptions(databaseURL, OpenOptions{})
 }
@@ -151,16 +152,97 @@ func openPostgres(databaseURL string, options OpenOptions) (*Store, error) {
 		sqlDB.Close()
 		return nil, fmt.Errorf("connect PostgreSQL: %w", err)
 	}
-	if !options.ReadOnly && os.Getenv("MUXAPI_SKIP_MIGRATE") != "1" {
-		if err := gormDB.AutoMigrate(allModels()...); err != nil {
+	if !options.ReadOnly {
+		if err := runPostgresMigrations(ctx, sqlDB); err != nil {
 			sqlDB.Close()
 			return nil, fmt.Errorf("migrate PostgreSQL: %w", err)
 		}
-		createCustomIndexes(gormDB, true)
 	} else {
-		slog.Info("skipping AutoMigrate (MUXAPI_SKIP_MIGRATE=1)")
+		slog.Info("skipping PostgreSQL migrations in read-only mode")
 	}
 	return newStore(gormDB, sqlDB, true), nil
+}
+
+// runPostgresMigrations applies each embedded migration once, in filename order.
+func runPostgresMigrations(ctx context.Context, db *sql.DB) error {
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+		version TEXT PRIMARY KEY,
+		applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`); err != nil {
+		return err
+	}
+	entries, err := migrations.Files.ReadDir(".")
+	if err != nil {
+		return err
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	// Older dev builds used GORM AutoMigrate before versioned migrations were
+	// restored. Such a database has the complete intelligent-routing schema but
+	// an empty schema_migrations table. Mark only the historical migrations as
+	// applied, then let the current and future migrations run normally.
+	var appliedCount int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&appliedCount); err != nil {
+		return err
+	}
+	if appliedCount == 0 {
+		var hasRoutingTables, hasCacheMode bool
+		if err := db.QueryRowContext(ctx, `SELECT EXISTS(
+			SELECT 1 FROM information_schema.tables
+			WHERE table_schema=current_schema() AND table_name='route_decisions')`).Scan(&hasRoutingTables); err != nil {
+			return err
+		}
+		if err := db.QueryRowContext(ctx, `SELECT EXISTS(
+			SELECT 1 FROM information_schema.columns
+			WHERE table_schema=current_schema() AND table_name='upstreams' AND column_name='cache_mode')`).Scan(&hasCacheMode); err != nil {
+			return err
+		}
+		if hasRoutingTables && hasCacheMode {
+			const currentMigration = "20260902_100000_add_intelligent_routing.sql"
+			for _, entry := range entries {
+				if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") || entry.Name() >= currentMigration {
+					continue
+				}
+				version := strings.TrimSuffix(entry.Name(), ".sql")
+				if _, err := db.ExecContext(ctx,
+					`INSERT INTO schema_migrations(version) VALUES($1) ON CONFLICT DO NOTHING`, version); err != nil {
+					return fmt.Errorf("baseline legacy GORM migration %s: %w", entry.Name(), err)
+				}
+			}
+		}
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+			continue
+		}
+		version := strings.TrimSuffix(entry.Name(), ".sql")
+		var applied bool
+		if err := db.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=$1)`, version).Scan(&applied); err != nil {
+			return err
+		}
+		if applied {
+			continue
+		}
+		body, err := migrations.Files.ReadFile(entry.Name())
+		if err != nil {
+			return err
+		}
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, string(body)); err == nil {
+			_, err = tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES($1)`, version)
+		}
+		if err != nil {
+			tx.Rollback()
+			return fmt.Errorf("%s: %w", entry.Name(), err)
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func openSQLite(path string) (*Store, error) {

@@ -162,7 +162,7 @@ func (s *Store) overviewBillingUpstreams(groupID, tagID int64) ([]overviewBillin
 		args = append(args, groupID)
 	}
 	query += ` ORDER BY u.id`
-	rows, err := s.sqlDB.Query(query, args...)
+	rows, err := s.query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -213,7 +213,7 @@ func (s *Store) overviewBillingSnapshots(upstreamIDs []int64, start, end time.Ti
 		queryArgs = append(queryArgs, id)
 	}
 	queryArgs = append(queryArgs, s.timeValue(start), s.timeValue(end))
-	rows, err := s.sqlDB.Query(query, queryArgs...)
+	rows, err := s.query(query, queryArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -371,7 +371,7 @@ func (s *Store) overviewSuccessTrend(groupID, tagID int64, start time.Time, poin
 		args = append(args, tagID)
 	}
 	query += ` GROUP BY bucket`
-	rows, err := s.sqlDB.Query(query, args...)
+	rows, err := s.query(query, args...)
 	if err != nil {
 		return nil, err
 	}

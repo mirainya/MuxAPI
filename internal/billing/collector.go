@@ -253,7 +253,7 @@ func fetchNewAPI(ctx context.Context, item *upstream.Upstream) (Result, error) {
 			result.BillingGroup = group
 		}
 		var detail newAPILogBilling
-		if !decodeNewAPILogBilling(entry.Other, &detail) {
+		if !decodeNewAPILogBilling(entry.Other, &detail) || detail.GroupRatio == nil {
 			continue
 		}
 		// 分组变更后，旧分组的扣费不能套到当前分组上。
@@ -309,10 +309,6 @@ func fetchNewAPI(ctx context.Context, item *upstream.Upstream) (Result, error) {
 	}
 	if result.EffectiveMultiplier == nil {
 		result.Warning = "New API billing multiplier is unavailable"
-	}
-	if result.ReportedActualCost != nil && result.EffectiveMultiplier != nil && *result.EffectiveMultiplier > 1e-9 {
-		listCost := *result.ReportedActualCost / *result.EffectiveMultiplier
-		result.ReportedListCost = &listCost
 	}
 	return result, nil
 }

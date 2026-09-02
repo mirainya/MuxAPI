@@ -41,7 +41,7 @@ func (s *Store) OverviewUsageCost(fromAt, toAt int64) (OverviewCostEstimate, err
 		LEFT JOIN upstreams u ON u.id=a.upstream_id
 		WHERE a.outcome IN ('success','partial') AND a.completed_at>? AND a.completed_at<=?
 		GROUP BY r.model,` + protocolExpr + ` ORDER BY r.model`
-	rows, err := s.sqlDB.Query(query, s.timeValue(time.Unix(fromAt, 0)), s.timeValue(time.Unix(toAt, 0)))
+	rows, err := s.query(query, s.timeValue(time.Unix(fromAt, 0)), s.timeValue(time.Unix(toAt, 0)))
 	if err != nil {
 		return estimate, err
 	}

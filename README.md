@@ -96,7 +96,7 @@ Windows 双击运行版使用项目脚本构建，生成的程序不会显示控
 
 默认监听 `:8080`，启动前必须配置 PostgreSQL 连接串。浏览器打开 `http://<地址>:<端口>` 即管理后台，「设置」页会显示客户端接入地址。
 
-应用启动时会按文件名顺序自动执行 `database/migrations/` 中尚未应用的 PostgreSQL 迁移，并记录到 `schema_migrations`。
+应用启动时会按文件名顺序自动执行 `database/migrations/` 中尚未应用的 PostgreSQL 迁移，并记录到 `schema_migrations`。SQLite 测试库由 GORM 自动建表；生产 PostgreSQL 不使用 `AutoMigrate`。
 
 从旧 SQLite 数据库迁移配置：
 

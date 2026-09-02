@@ -52,7 +52,9 @@ func TestManagerRateLimitPoolBackoff(t *testing.T) {
 	if !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("first refresh: want ErrRateLimited, got %v", err)
 	}
-	m.markRateLimited(first)
+	if !m.inCoolDown(first) {
+		t.Fatal("manual Refresh should put the upstream in cool-down")
+	}
 
 	// 另外两把 key 应共享冷却，直接跳过
 	k2, _ := st.Get(2)
