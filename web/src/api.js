@@ -326,7 +326,8 @@ export const api = {
   routeDecisions: async (params) => {
     const p = new URLSearchParams()
     if (params) for (const [k, v] of Object.entries(params)) { if (v != null && v !== '') p.set(k, v) }
-    p.set('include_candidates', 'true')
+    // 列表页可关闭候选渠道，详情页再按需加载，减少首屏响应体。
+    if (!p.has('include_candidates')) p.set('include_candidates', 'true')
     const qs = p.toString()
     const raw = await req('GET', '/routing/decisions' + (qs ? '?' + qs : ''))
     const items = unwrap(raw)
