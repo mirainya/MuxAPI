@@ -200,7 +200,12 @@ async function loadMembers(gid) {
   const data = (await api.members(gid)) || []
   if (ep === loadEpoch) members.value = data
 }
-const mhTitle = mh => mh.model + ' · 当前渠道暂不支持；点击立即恢复'
+const mhTitle = mh => {
+  const policy = mh.excluded_until ? `排除至 ${new Date(mh.excluded_until).toLocaleString()}` : '永久排除'
+  const count = mh.failure_count ? `，已确认 ${mh.failure_count} 次` : ''
+  const status = mh.last_status ? `，HTTP ${mh.last_status}` : ''
+  return `${mh.model} · ${policy}${count}${status}；点击删除排除并重新启用`
+}
 async function loadDetail(gid) {
   const ep = loadEpoch
   await loadMembers(gid)
@@ -1573,7 +1578,7 @@ const rtLabel = h => rtUnprobed(h) ? '待探测' : ({ CLOSED: '正常', HALF_OPE
 const rtClass = h => rtUnprobed(h) ? 'nodata' : ({ CLOSED: 'closed', HALF_OPEN: 'half', OPEN: 'open' }[h?.state] || 'nodata')
 const rtRate = h => (h && h.reqs) ? (h.succ_rate * 100).toFixed(0) + '%' : '—'
 
-// 模型徽章只表示短期能力排除，不再表示独立熔断状态。
+// 模型徽章表示持久能力排除或 TTL 到期后的待重探状态，不是独立熔断器。
 const mhClass = mh => mh?.state === 'UNSUPPORTED' ? 'open' : 'nodata'
 const visibleDots = item => item?.model_health || []
 
@@ -2919,7 +2924,7 @@ function logout() {
                 <div class="settings-fields">
                   <div class="field"><label>恢复所需连续成功</label><input v-model="breakerRecoverySuccesses" type="number" min="1" max="100" /></div>
                   <div class="field"><label>最大冷却时间</label><input v-model="breakerMaxCooldown" placeholder="5m" /></div>
-                  <div class="field"><label>模型不支持缓存时间</label><input v-model="modelUnsupportedTTL" placeholder="5m" /></div>
+                  <div class="field"><label>模型排除有效期（0s=永久）</label><input v-model="modelUnsupportedTTL" placeholder="0s" /></div>
                 </div>
                 <div class="settings-info">
                   <div><span>算法</span><b>{{ intelligentRoutingEnabled ? '智能成本路由' : '标准 P2C' }}</b><em>渠道级</em></div>
