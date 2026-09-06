@@ -54,6 +54,7 @@ func main() {
 		"cooldown":              cfg.Cooldown.String(),
 		"max_upstream_attempts": strconv.Itoa(initialMaxAttempts),
 		"max_body_bytes":        strconv.FormatInt(cfg.MaxBody, 10),
+		"model_unsupported_ttl": "0s",
 	}
 	storedSettings, err := st.Settings()
 	if err != nil {
@@ -79,6 +80,14 @@ func main() {
 	settingDuration := func(key string, def time.Duration) func() time.Duration {
 		return func() time.Duration {
 			if d, err := time.ParseDuration(runtimeSettings.Get(key)); err == nil && d > 0 {
+				return d
+			}
+			return def
+		}
+	}
+	settingDurationAllowZero := func(key string, def time.Duration) func() time.Duration {
+		return func() time.Duration {
+			if d, err := time.ParseDuration(runtimeSettings.Get(key)); err == nil && d >= 0 {
 				return d
 			}
 			return def
@@ -149,8 +158,12 @@ func main() {
 	hm := health.New(failThreshold(), cooldown())
 	breakerRecoverySuccesses := settingInt("breaker_recovery_successes", 2)
 	breakerMaxCooldown := settingDuration("breaker_max_cooldown", 5*time.Minute)
-	modelUnsupportedTTL := settingDuration("model_unsupported_ttl", 5*time.Minute)
+	modelUnsupportedTTL := settingDurationAllowZero("model_unsupported_ttl", 0)
 	hm.SetAdvancedPolicy(breakerRecoverySuccesses(), breakerMaxCooldown(), modelUnsupportedTTL())
+	if err := hm.SetModelExclusionStore(st); err != nil {
+		slog.Error("restore model exclusions failed", "err", err)
+		return
+	}
 	// 重启恢复：用最近的转发样本重建选路用的渠道延迟 EWMA，不重建熔断状态
 	if samples, err := st.RecentSamples(2000); err != nil {
 		slog.Warn("seed route stats from logs failed", "err", err)

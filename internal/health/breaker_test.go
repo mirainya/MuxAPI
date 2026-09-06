@@ -204,9 +204,136 @@ func TestModelUnsupportedDoesNotAffectChannel(t *testing.T) {
 func TestModelUnsupportedExpires(t *testing.T) {
 	m := New(1, time.Hour)
 	key := modelKey{1, "gpt"}
-	m.unsupported[key] = time.Now().Add(-time.Second)
+	expires := time.Now().Add(-time.Second)
+	m.unsupported[key] = &ModelExclusion{UpstreamID: 1, Model: "gpt", ExcludedUntil: &expires}
 	if !m.IsAvailable(1, "gpt") {
 		t.Fatal("expired capability exclusion should be removed")
+	}
+}
+
+type memoryExclusionStore struct {
+	mu      sync.Mutex
+	records map[modelKey]ModelExclusion
+}
+
+func newMemoryExclusionStore() *memoryExclusionStore {
+	return &memoryExclusionStore{records: make(map[modelKey]ModelExclusion)}
+}
+
+func (s *memoryExclusionStore) LoadModelExclusions() ([]ModelExclusion, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]ModelExclusion, 0, len(s.records))
+	for _, record := range s.records {
+		out = append(out, record)
+	}
+	return out, nil
+}
+
+func (s *memoryExclusionStore) UpsertModelExclusion(record ModelExclusion) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := modelKey{record.UpstreamID, record.Model}
+	if previous, ok := s.records[key]; ok {
+		record.FailureCount = previous.FailureCount + 1
+	}
+	s.records[key] = record
+	return nil
+}
+
+func (s *memoryExclusionStore) DeleteModelExclusion(upstreamID int64, model string) error {
+	s.mu.Lock()
+	delete(s.records, modelKey{upstreamID, model})
+	s.mu.Unlock()
+	return nil
+}
+
+func TestPermanentModelExclusionPersistsAcrossRestartAndSuccess(t *testing.T) {
+	storage := newMemoryExclusionStore()
+	first := New(3, time.Hour)
+	first.SetAdvancedPolicy(2, time.Hour, 0)
+	if err := first.SetModelExclusionStore(storage); err != nil {
+		t.Fatal(err)
+	}
+
+	lateSuccess, _ := first.Claim(1, 7, "glm-5")
+	failure, _ := first.Claim(1, 7, "glm-5")
+	first.CompleteModelUnsupported(failure, 12, 404, `{"error":{"code":"model_not_found"}}`)
+	first.Complete(lateSuccess, ResultSuccess, 10)
+	if !first.IsModelUnsupported(7, "glm-5") {
+		t.Fatal("ordinary success must not clear a newer permanent exclusion")
+	}
+
+	restarted := New(3, time.Hour)
+	if err := restarted.SetModelExclusionStore(storage); err != nil {
+		t.Fatal(err)
+	}
+	if !restarted.IsModelUnsupported(7, "glm-5") || restarted.IsAvailable(7, "glm-5") {
+		t.Fatal("restart did not restore permanent model exclusion")
+	}
+	states := restarted.ModelStates(7)
+	if len(states) != 1 || states[0].Model != "glm-5" {
+		t.Fatalf("unexpected restored states: %+v", states)
+	}
+	if err := restarted.RecoverModel(7, "glm-5"); err != nil {
+		t.Fatal(err)
+	}
+	if restarted.IsModelUnsupported(7, "glm-5") {
+		t.Fatal("manual recovery did not clear memory state")
+	}
+	if records, _ := storage.LoadModelExclusions(); len(records) != 0 {
+		t.Fatalf("manual recovery did not clear durable state: %+v", records)
+	}
+}
+
+func TestExpiredModelExclusionAllowsSingleConcurrentReprobe(t *testing.T) {
+	storage := newMemoryExclusionStore()
+	expires := time.Now().Add(-time.Second)
+	storage.records[modelKey{9, "glm-5"}] = ModelExclusion{
+		UpstreamID: 9, Model: "glm-5", ExcludedUntil: &expires,
+		FailureCount: 1, LastFailedAt: time.Now().Add(-time.Minute),
+	}
+	m := New(3, time.Hour)
+	m.SetAdvancedPolicy(2, time.Hour, time.Minute)
+	if err := m.SetModelExclusionStore(storage); err != nil {
+		t.Fatal(err)
+	}
+
+	var accepted int32
+	var acceptedLease Lease
+	var leaseMu sync.Mutex
+	var wg sync.WaitGroup
+	for range 16 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if lease, ok := m.Claim(1, 9, "glm-5"); ok {
+				atomic.AddInt32(&accepted, 1)
+				leaseMu.Lock()
+				acceptedLease = lease
+				leaseMu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if accepted != 1 {
+		t.Fatalf("expired exclusion admitted %d concurrent re-probes, want 1", accepted)
+	}
+	m.Complete(acceptedLease, ResultSuccess, 10)
+	if m.IsModelUnsupported(9, "glm-5") {
+		t.Fatal("successful TTL re-probe did not clear exclusion")
+	}
+	if records, _ := storage.LoadModelExclusions(); len(records) != 0 {
+		t.Fatalf("successful TTL re-probe did not clear durable row: %+v", records)
+	}
+}
+
+func TestModelsDiscoveredDoesNotClearExclusion(t *testing.T) {
+	m := New(3, time.Hour)
+	m.MarkModelUnsupported(1, "glm-5")
+	m.MarkModelsDiscovered(1, []string{"glm-5", "deepseek-v4"})
+	if !m.IsModelUnsupported(1, "glm-5") {
+		t.Fatal("positive model discovery cleared a negative capability record")
 	}
 }
 

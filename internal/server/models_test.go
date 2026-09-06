@@ -85,3 +85,72 @@ func TestListModelsDeduplicatesConcurrentFetches(t *testing.T) {
 		}
 	}
 }
+
+func TestListModelsKeepsAdvertisedModelUntilEveryProviderIsExcluded(t *testing.T) {
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"data":[{"id":"glm-5"},{"id":"deepseek-v4"}]}`))
+	}))
+	defer provider.Close()
+
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	for _, name := range []string{"A", "B"} {
+		if err := st.Create(&upstream.Upstream{Name: name, BaseURL: provider.URL, APIKey: "k", Enabled: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ups, _ := st.List()
+	groupID, _ := st.CreateGroup("domestic", "")
+	for _, item := range ups {
+		st.AddMember(groupID, item.ID, 1, 1)
+	}
+	key, _ := st.CreateKey("client", groupID)
+
+	hm := health.New(3, time.Hour)
+	if err := hm.SetModelExclusionStore(st); err != nil {
+		t.Fatal(err)
+	}
+	sched := scheduler.New(func(int64) []*upstream.Upstream { return ups }, hm)
+	srv := New(forward.New(sched, hm, 3), "", st, hm, monitor.New(st), nil, 32<<20)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	fetch := func() []string {
+		req, _ := http.NewRequest(http.MethodGet, ts.URL+"/v1/models", nil)
+		req.Header.Set("Authorization", "Bearer "+key)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var payload struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		ids := make([]string, 0, len(payload.Data))
+		for _, item := range payload.Data {
+			ids = append(ids, item.ID)
+		}
+		return ids
+	}
+
+	hm.MarkModelUnsupported(ups[0].ID, "glm-5")
+	if got := fetch(); len(got) != 2 {
+		t.Fatalf("one healthy provider should keep glm-5 advertised: %v", got)
+	}
+	if !hm.IsModelUnsupported(ups[0].ID, "glm-5") {
+		t.Fatal("positive /v1/models refresh cleared the durable exclusion")
+	}
+	hm.MarkModelUnsupported(ups[1].ID, "glm-5")
+	if got := fetch(); len(got) != 1 || got[0] != "deepseek-v4" {
+		t.Fatalf("fully excluded model should be hidden: %v", got)
+	}
+}

@@ -318,7 +318,10 @@ func (s *Server) recoverUpstreamModel(w http.ResponseWriter, r *http.Request, id
 		http.Error(w, "model must be 1-256 characters", http.StatusBadRequest)
 		return
 	}
-	s.health.MarkModelSupported(id, input.Model)
+	if err := s.health.RecoverModel(id, input.Model); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

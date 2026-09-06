@@ -19,6 +19,7 @@ import (
 
 	"github.com/mirainya/muxapi/internal/health"
 	"github.com/mirainya/muxapi/internal/scheduler"
+	"github.com/mirainya/muxapi/internal/store"
 	"github.com/mirainya/muxapi/internal/upstream"
 )
 
@@ -632,11 +633,26 @@ func TestForwardModelUnsupportedFailover(t *testing.T) {
 	}))
 	defer b.Close()
 
-	upstreams := []*upstream.Upstream{
-		{ID: 1, BaseURL: a.URL, APIKey: "k", Priority: 1, Weight: 1},
-		{ID: 2, BaseURL: b.URL, APIKey: "k", Priority: 2, Weight: 1},
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
 	}
+	defer st.Close()
+	upstreams := []*upstream.Upstream{
+		{Name: "unsupported", BaseURL: a.URL, APIKey: "k", Enabled: true},
+		{Name: "backup", BaseURL: b.URL, APIKey: "k", Enabled: true},
+	}
+	for _, item := range upstreams {
+		if err := st.Create(item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	upstreams[0].Priority, upstreams[0].Weight = 1, 1
+	upstreams[1].Priority, upstreams[1].Weight = 2, 1
 	hm := health.New(1, time.Hour)
+	if err := hm.SetModelExclusionStore(st); err != nil {
+		t.Fatal(err)
+	}
 	fwd := New(scheduler.New(func(int64) []*upstream.Upstream { return upstreams }, hm), hm, 3)
 	body := []byte(`{"model":"gpt-5.6"}`)
 	recorder := httptest.NewRecorder()
@@ -648,11 +664,22 @@ func TestForwardModelUnsupportedFailover(t *testing.T) {
 	if aHits != 1 || bHits != 1 {
 		t.Fatalf("expected one attempt per upstream, A=%d B=%d", aHits, bHits)
 	}
-	if !hm.IsModelUnsupported(1, "gpt-5.6") {
+	if !hm.IsModelUnsupported(upstreams[0].ID, "gpt-5.6") {
 		t.Fatal("model capability should be cached for A")
 	}
-	if hm.EffectiveState(1) != "CLOSED" {
+	if hm.EffectiveState(upstreams[0].ID) != "CLOSED" {
 		t.Fatal("model capability mismatch must not open A")
+	}
+	records, err := st.ListModelExclusions()
+	if err != nil || len(records) != 1 || records[0].LastStatus != http.StatusNotFound ||
+		records[0].FailureCount != 1 || !strings.Contains(records[0].LastReason, "model_not_found") {
+		t.Fatalf("model exclusion was not persisted with evidence: records=%+v err=%v", records, err)
+	}
+
+	second := httptest.NewRecorder()
+	fwd.Forward(second, httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body)), body, 1, "")
+	if second.Code != http.StatusOK || aHits != 1 || bHits != 2 {
+		t.Fatalf("later request retried excluded upstream: status=%d A=%d B=%d", second.Code, aHits, bHits)
 	}
 }
 
