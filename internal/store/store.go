@@ -104,6 +104,7 @@ func allModels() []any {
 		&UpstreamPrefixCacheStatsModel{},
 		&ModelMappingModel{},
 		&UpstreamModelEntry{},
+		&ModelExclusion{},
 	}
 }
 
@@ -241,6 +242,27 @@ func runPostgresMigrations(ctx context.Context, db *sql.DB) error {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
+	}
+	// schema_migrations is replicated between Home and US, while DDL is not.
+	// A peer may therefore have replicated this version row before the local
+	// CREATE TABLE ran. Keep this table's DDL idempotently guarded at startup so
+	// either side self-heals that ordering without touching the migration row.
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS upstream_model_exclusions (
+		upstream_id BIGINT NOT NULL REFERENCES upstreams(id) ON DELETE CASCADE,
+		model TEXT NOT NULL,
+		excluded_until TIMESTAMPTZ,
+		failure_count INTEGER NOT NULL DEFAULT 1,
+		last_status INTEGER NOT NULL DEFAULT 0,
+		last_reason TEXT NOT NULL DEFAULT '',
+		last_failed_at TIMESTAMPTZ NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL,
+		PRIMARY KEY (upstream_id, model)
+	)`); err != nil {
+		return fmt.Errorf("ensure upstream model exclusions table: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_upstream_model_exclusions_updated
+		ON upstream_model_exclusions(updated_at DESC)`); err != nil {
+		return fmt.Errorf("ensure upstream model exclusions index: %w", err)
 	}
 	return nil
 }

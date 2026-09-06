@@ -2,7 +2,9 @@
 package health
 
 import (
+	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -57,6 +59,45 @@ type modelKey struct {
 	model      string
 }
 
+// ModelExclusion is the storage-neutral representation of a durable negative
+// capability observation. A nil ExcludedUntil means permanent exclusion.
+type ModelExclusion struct {
+	UpstreamID    int64
+	Model         string
+	ExcludedUntil *time.Time
+	FailureCount  int
+	LastStatus    int
+	LastReason    string
+	LastFailedAt  time.Time
+	UpdatedAt     time.Time
+	reprobeLease  uint64
+}
+
+// ModelExclusionStore is implemented by the persistence layer. The health
+// package intentionally depends on this small interface to avoid a store cycle.
+type ModelExclusionStore interface {
+	LoadModelExclusions() ([]ModelExclusion, error)
+	UpsertModelExclusion(ModelExclusion) error
+	DeleteModelExclusion(upstreamID int64, model string) error
+}
+
+func (e *ModelExclusion) publicCopy() ModelExclusion {
+	if e == nil {
+		return ModelExclusion{}
+	}
+	copy := *e
+	copy.reprobeLease = 0
+	return copy
+}
+
+func expiry(now time.Time, ttl time.Duration) *time.Time {
+	if ttl <= 0 {
+		return nil
+	}
+	v := now.Add(ttl)
+	return &v
+}
+
 // Result is the breaker-relevant outcome of one leased attempt.
 type Result uint8
 
@@ -84,6 +125,7 @@ type leaseRecord struct {
 	probe         bool
 	authoritative bool
 	recovery      bool
+	modelReprobe  bool
 }
 
 type groupRecovery struct {
@@ -117,7 +159,7 @@ const (
 	trendCap     = 60
 	ewmaAlpha    = 0.3
 
-	defaultModelUnsupportedTTL = 5 * time.Minute
+	defaultModelUnsupportedTTL = time.Duration(0)
 	defaultRecoverySuccessGoal = 2
 	defaultMaxCooldown         = 5 * time.Minute
 )
@@ -137,12 +179,12 @@ type Alerter interface {
 	Notify(ev AlertEvent)
 }
 
-// Manager owns one breaker per upstream. Model-specific state is limited to a
-// short negative capability cache and never participates in channel recovery.
+// Manager owns one breaker per upstream and a write-through negative model
+// capability cache. Model exclusions never participate in channel recovery.
 type Manager struct {
 	mu            sync.Mutex
 	breakers      map[int64]*breaker
-	unsupported   map[modelKey]time.Time
+	unsupported   map[modelKey]*ModelExclusion
 	capLatest     map[modelKey]uint64
 	leases        map[uint64]leaseRecord
 	groupRecovery map[int64]*groupRecovery
@@ -152,6 +194,8 @@ type Manager struct {
 	recoveryGoal  int
 	maxCooldown   time.Duration
 	modelTTL      time.Duration
+	persistModel  func(ModelExclusion) error
+	deleteModel   func(upstreamID int64, model string) error
 	alerter       Alerter
 }
 
@@ -165,7 +209,7 @@ func New(failThreshold int, cooldown time.Duration) *Manager {
 	}
 	return &Manager{
 		breakers:      make(map[int64]*breaker),
-		unsupported:   make(map[modelKey]time.Time),
+		unsupported:   make(map[modelKey]*ModelExclusion),
 		capLatest:     make(map[modelKey]uint64),
 		leases:        make(map[uint64]leaseRecord),
 		groupRecovery: make(map[int64]*groupRecovery),
@@ -186,12 +230,90 @@ func (m *Manager) SetAdvancedPolicy(recoveryGoal int, maxCooldown, modelTTL time
 	if maxCooldown <= 0 {
 		maxCooldown = defaultMaxCooldown
 	}
-	if modelTTL <= 0 {
+	if modelTTL < 0 {
 		modelTTL = defaultModelUnsupportedTTL
 	}
 	m.mu.Lock()
 	m.recoveryGoal, m.maxCooldown, m.modelTTL = recoveryGoal, maxCooldown, modelTTL
 	m.mu.Unlock()
+}
+
+// SetModelExclusionStore attaches durable capability state and restores it on
+// startup. Expired TTL records remain in memory so Claim can admit only one
+// controlled re-probe at a time.
+func (m *Manager) SetModelExclusionStore(store ModelExclusionStore) error {
+	m.mu.Lock()
+	m.persistModel = nil
+	m.deleteModel = nil
+	m.mu.Unlock()
+	if store == nil {
+		return nil
+	}
+	records, err := store.LoadModelExclusions()
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	for _, record := range records {
+		if record.UpstreamID <= 0 || strings.TrimSpace(record.Model) == "" {
+			continue
+		}
+		if record.FailureCount < 1 {
+			record.FailureCount = 1
+		}
+		key := modelKey{record.UpstreamID, record.Model}
+		entry := record
+		m.unsupported[key] = &entry
+		m.nextToken++
+		m.capLatest[key] = m.nextToken
+	}
+	m.persistModel = store.UpsertModelExclusion
+	m.deleteModel = store.DeleteModelExclusion
+	m.mu.Unlock()
+	return nil
+}
+
+// RecoverModel removes one exclusion from memory and storage. It is the
+// explicit operator path for re-enabling a model on a channel.
+func (m *Manager) RecoverModel(id int64, model string) error {
+	model = strings.TrimSpace(model)
+	if id <= 0 || model == "" {
+		return nil
+	}
+	m.mu.Lock()
+	deleteModel := m.deleteModel
+	m.mu.Unlock()
+	if deleteModel != nil {
+		if err := deleteModel(id, model); err != nil {
+			return err
+		}
+	}
+	m.mu.Lock()
+	key := modelKey{id, model}
+	m.nextToken++
+	m.capLatest[key] = m.nextToken
+	delete(m.unsupported, key)
+	m.mu.Unlock()
+	return nil
+}
+
+// MarkModelsDiscovered records positive discovery without clearing a durable
+// exclusion. A model list is evidence that the endpoint advertises a name, not
+// proof that this exact request path can serve it.
+func (m *Manager) MarkModelsDiscovered(id int64, models []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, model := range models {
+		key := modelKey{id, strings.TrimSpace(model)}
+		if key.model == "" {
+			continue
+		}
+		if exclusion := m.unsupported[key]; exclusion != nil && (exclusion.ExcludedUntil == nil || time.Now().Before(*exclusion.ExcludedUntil)) {
+			continue
+		}
+		m.nextToken++
+		m.capLatest[key] = m.nextToken
+	}
 }
 
 // SetAlerter 设置状态翻转通知器。
@@ -242,15 +364,20 @@ func (m *Manager) modelUnsupportedLocked(id int64, model string) bool {
 		return false
 	}
 	k := modelKey{id, model}
-	expires, ok := m.unsupported[k]
+	exclusion, ok := m.unsupported[k]
 	if !ok {
 		return false
 	}
-	if time.Now().After(expires) {
-		delete(m.unsupported, k)
-		return false
+	if exclusion.ExcludedUntil == nil || time.Now().Before(*exclusion.ExcludedUntil) {
+		return true
 	}
-	return true
+	return exclusion.reprobeLease != 0
+}
+
+func (m *Manager) modelNeedsReprobeLocked(id int64, model string) bool {
+	exclusion := m.unsupported[modelKey{id, model}]
+	return exclusion != nil && exclusion.ExcludedUntil != nil &&
+		!time.Now().Before(*exclusion.ExcludedUntil) && exclusion.reprobeLease == 0
 }
 
 // IsAvailable checks channel health and the model capability cache.
@@ -279,7 +406,15 @@ func (m *Manager) Claim(groupID, id int64, model string) (Lease, bool) {
 	if recovery && !m.groupCanRecoverLocked(groupID) {
 		return Lease{}, false
 	}
-	return m.newLeaseLocked(groupID, id, model, false, true, recovery), true
+	lease := m.newLeaseLocked(groupID, id, model, false, true, recovery)
+	if m.modelNeedsReprobeLocked(id, model) {
+		key := modelKey{id, model}
+		m.unsupported[key].reprobeLease = lease.Token
+		record := m.leases[lease.Token]
+		record.modelReprobe = true
+		m.leases[lease.Token] = record
+	}
+	return lease, true
 }
 
 // ClaimLastResort permits one early, group-scoped recovery trial after all
@@ -298,7 +433,15 @@ func (m *Manager) ClaimLastResort(groupID, id int64, model string) (Lease, bool)
 	b.state = HalfOpen
 	b.recoverySuccesses = 0
 	b.earlyTrial = false
-	return m.newLeaseLocked(groupID, id, model, false, true, true), true
+	lease := m.newLeaseLocked(groupID, id, model, false, true, true)
+	if m.modelNeedsReprobeLocked(id, model) {
+		key := modelKey{id, model}
+		m.unsupported[key].reprobeLease = lease.Token
+		record := m.leases[lease.Token]
+		record.modelReprobe = true
+		m.leases[lease.Token] = record
+	}
+	return lease, true
 }
 
 // BeginProbe always returns an observation lease so monitoring remains useful.
@@ -354,6 +497,16 @@ func (m *Manager) groupCanRecoverLocked(groupID int64) bool {
 // Complete records and releases one lease exactly once. Results from an older
 // breaker generation remain visible in statistics but cannot change state.
 func (m *Manager) Complete(lease Lease, result Result, latencyMs int64) {
+	m.complete(lease, result, latencyMs, 0, "")
+}
+
+// CompleteModelUnsupported records the structured upstream failure details and
+// durably excludes this exact upstream/model pair.
+func (m *Manager) CompleteModelUnsupported(lease Lease, latencyMs int64, status int, reason string) {
+	m.complete(lease, ResultModelUnsupported, latencyMs, status, reason)
+}
+
+func (m *Manager) complete(lease Lease, result Result, latencyMs int64, status int, reason string) {
 	m.mu.Lock()
 	record, ok := m.leases[lease.Token]
 	if !ok || record.upstreamID != lease.UpstreamID {
@@ -385,15 +538,34 @@ func (m *Manager) Complete(lease Lease, result Result, latencyMs int64) {
 
 	sameGeneration := record.generation == b.generation
 	key := modelKey{record.upstreamID, record.model}
-	if sameGeneration && record.model != "" &&
-		(result == ResultSuccess || result == ResultModelUnsupported) && lease.Token >= m.capLatest[key] {
+	var persist *ModelExclusion
+	var remove *modelKey
+	if exclusion := m.unsupported[key]; exclusion != nil && exclusion.reprobeLease == lease.Token {
+		exclusion.reprobeLease = 0
+	}
+	if sameGeneration && record.model != "" && result == ResultSuccess && lease.Token >= m.capLatest[key] {
 		m.capLatest[key] = lease.Token
-		switch result {
-		case ResultSuccess:
+		if record.modelReprobe {
 			delete(m.unsupported, key)
-		case ResultModelUnsupported:
-			m.unsupported[key] = time.Now().Add(m.modelTTL)
+			copy := key
+			remove = &copy
 		}
+	} else if sameGeneration && record.model != "" && result == ResultModelUnsupported && lease.Token >= m.capLatest[key] {
+		m.capLatest[key] = lease.Token
+		now := time.Now()
+		exclusion := m.unsupported[key]
+		if exclusion == nil {
+			exclusion = &ModelExclusion{UpstreamID: record.upstreamID, Model: record.model}
+			m.unsupported[key] = exclusion
+		}
+		exclusion.FailureCount++
+		exclusion.LastStatus = status
+		exclusion.LastReason = truncateModelReason(reason)
+		exclusion.LastFailedAt = now
+		exclusion.UpdatedAt = now
+		exclusion.ExcludedUntil = expiry(now, m.modelTTL)
+		copy := exclusion.publicCopy()
+		persist = &copy
 	}
 
 	from, to := b.state, b.state
@@ -423,6 +595,16 @@ func (m *Manager) Complete(lease Lease, result Result, latencyMs int64) {
 	}
 	ev, flipped := transitionEvent(record.upstreamID, record.model, from, to, b.fails)
 	m.mu.Unlock()
+	if persist != nil && m.persistModel != nil {
+		if err := m.persistModel(*persist); err != nil {
+			slog.Error("persist model exclusion failed", "upstream_id", persist.UpstreamID, "model", persist.Model, "err", err)
+		}
+	}
+	if remove != nil && m.deleteModel != nil {
+		if err := m.deleteModel(remove.upstreamID, remove.model); err != nil {
+			slog.Error("delete expired model exclusion after successful re-probe failed", "upstream_id", remove.upstreamID, "model", remove.model, "err", err)
+		}
+	}
 	if flipped {
 		m.dispatch(ev)
 	}
@@ -450,38 +632,59 @@ func (m *Manager) InFlight(id int64) int64 {
 	return m.get(id).inFlight
 }
 
-// MarkModelUnsupported excludes a deterministic model/channel mismatch for a
-// short period without changing channel health.
+// MarkModelUnsupported excludes a deterministic model/channel mismatch without
+// changing channel health. It is permanent unless modelTTL is configured.
 func (m *Manager) MarkModelUnsupported(id int64, model string) {
-	if model == "" {
+	m.MarkModelUnsupportedWithDetails(id, model, 0, "")
+}
+
+func (m *Manager) MarkModelUnsupportedWithDetails(id int64, model string, status int, reason string) {
+	model = strings.TrimSpace(model)
+	if id <= 0 || model == "" {
 		return
 	}
 	m.mu.Lock()
 	m.nextToken++
-	m.capLatest[modelKey{id, model}] = m.nextToken
-	m.unsupported[modelKey{id, model}] = time.Now().Add(m.modelTTL)
+	key := modelKey{id, model}
+	m.capLatest[key] = m.nextToken
+	now := time.Now()
+	exclusion := m.unsupported[key]
+	if exclusion == nil {
+		exclusion = &ModelExclusion{UpstreamID: id, Model: model}
+		m.unsupported[key] = exclusion
+	}
+	exclusion.FailureCount++
+	exclusion.LastStatus = status
+	exclusion.LastReason = truncateModelReason(reason)
+	exclusion.LastFailedAt = now
+	exclusion.UpdatedAt = now
+	exclusion.ExcludedUntil = expiry(now, m.modelTTL)
+	copy := exclusion.publicCopy()
 	m.mu.Unlock()
+	if m.persistModel != nil {
+		if err := m.persistModel(copy); err != nil {
+			slog.Error("persist model exclusion failed", "upstream_id", id, "model", model, "err", err)
+		}
+	}
+}
+
+func truncateModelReason(reason string) string {
+	const maxRunes = 2048
+	runes := []rune(strings.TrimSpace(reason))
+	if len(runes) > maxRunes {
+		runes = runes[:maxRunes]
+	}
+	return string(runes)
 }
 
 func (m *Manager) MarkModelSupported(id int64, model string) {
-	if model == "" {
-		return
-	}
-	m.mu.Lock()
-	m.nextToken++
-	m.capLatest[modelKey{id, model}] = m.nextToken
-	delete(m.unsupported, modelKey{id, model})
-	m.mu.Unlock()
+	_ = m.RecoverModel(id, model)
 }
 
 func (m *Manager) MarkModelsSupported(id int64, models []string) {
-	m.mu.Lock()
 	for _, model := range models {
-		m.nextToken++
-		m.capLatest[modelKey{id, model}] = m.nextToken
-		delete(m.unsupported, modelKey{id, model})
+		_ = m.RecoverModel(id, model)
 	}
-	m.mu.Unlock()
 }
 
 func (m *Manager) IsModelUnsupported(id int64, model string) bool {
@@ -741,8 +944,13 @@ func (m *Manager) Snapshot(id int64) Snapshot {
 
 // ModelHealth 表示一条模型能力排除记录，不是独立熔断器。
 type ModelHealth struct {
-	Model string `json:"model"`
-	State string `json:"state"`
+	Model         string     `json:"model"`
+	State         string     `json:"state"`
+	ExcludedUntil *time.Time `json:"excluded_until,omitempty"`
+	FailureCount  int        `json:"failure_count"`
+	LastStatus    int        `json:"last_status"`
+	LastReason    string     `json:"last_reason,omitempty"`
+	LastFailedAt  time.Time  `json:"last_failed_at"`
 }
 
 func (m *Manager) ModelStates(id int64) []ModelHealth {
@@ -750,13 +958,17 @@ func (m *Manager) ModelStates(id int64) []ModelHealth {
 	defer m.mu.Unlock()
 	now := time.Now()
 	out := make([]ModelHealth, 0)
-	for key, expires := range m.unsupported {
-		if now.After(expires) {
-			delete(m.unsupported, key)
-			continue
-		}
+	for key, exclusion := range m.unsupported {
 		if key.upstreamID == id {
-			out = append(out, ModelHealth{Model: key.model, State: "UNSUPPORTED"})
+			state := "UNSUPPORTED"
+			if exclusion.ExcludedUntil != nil && !now.Before(*exclusion.ExcludedUntil) {
+				state = "REPROBE_PENDING"
+			}
+			out = append(out, ModelHealth{
+				Model: key.model, State: state, ExcludedUntil: exclusion.ExcludedUntil,
+				FailureCount: exclusion.FailureCount, LastStatus: exclusion.LastStatus,
+				LastReason: exclusion.LastReason, LastFailedAt: exclusion.LastFailedAt,
+			})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Model < out[j].Model })

@@ -32,6 +32,10 @@ type Health interface {
 	Complete(lease healthpkg.Lease, result healthpkg.Result, latencyMs int64)
 }
 
+type modelUnsupportedHealth interface {
+	CompleteModelUnsupported(lease healthpkg.Lease, latencyMs int64, status int, reason string)
+}
+
 // Picker 从指定分组选择一个未尝试且可用的上游。
 type Picker interface {
 	PickExcluding(groupID int64, model string, exclude map[int64]bool) (*upstream.Upstream, healthpkg.Lease, error)
@@ -517,7 +521,14 @@ func (f *Forwarder) Forward(w http.ResponseWriter, r *http.Request, body []byte,
 				if f.modelMapper != nil {
 					f.modelMapper.RecordFailure(candidate.ID, model)
 				}
-				complete(healthpkg.ResultModelUnsupported, responseMeta.ttftMs)
+				if !completed {
+					completed = true
+					if detailed, ok := f.health.(modelUnsupportedHealth); ok {
+						detailed.CompleteModelUnsupported(lease, responseMeta.ttftMs, resp.StatusCode, string(payload))
+					} else {
+						f.health.Complete(lease, healthpkg.ResultModelUnsupported, responseMeta.ttftMs)
+					}
+				}
 				attempts = append(attempts, attemptCtx.finish(f.health, resp.StatusCode, OutcomeUnsupported,
 					responseMeta, "model_unsupported", "upstream", string(payload)))
 				continue

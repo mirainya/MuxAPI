@@ -1,6 +1,8 @@
 package server
 
 import (
+	"time"
+
 	"github.com/mirainya/muxapi/internal/health"
 	"github.com/mirainya/muxapi/internal/store"
 )
@@ -31,8 +33,13 @@ func toHealthView(sn health.Snapshot, state string) healthView {
 
 // modelHealthView 模型能力排除的精简视图（上游/成员列表展开模型徽章用）。
 type modelHealthView struct {
-	Model string `json:"model"`
-	State string `json:"state"`
+	Model         string     `json:"model"`
+	State         string     `json:"state"`
+	ExcludedUntil *time.Time `json:"excluded_until,omitempty"`
+	FailureCount  int        `json:"failure_count"`
+	LastStatus    int        `json:"last_status"`
+	LastReason    string     `json:"last_reason,omitempty"`
+	LastFailedAt  time.Time  `json:"last_failed_at"`
 }
 
 // toModelHealthViews exposes temporary model capability exclusions.
@@ -42,7 +49,11 @@ func toModelHealthViews(ms []health.ModelHealth) []modelHealthView {
 	}
 	out := make([]modelHealthView, 0, len(ms))
 	for _, mh := range ms {
-		out = append(out, modelHealthView{Model: mh.Model, State: mh.State})
+		out = append(out, modelHealthView{
+			Model: mh.Model, State: mh.State, ExcludedUntil: mh.ExcludedUntil,
+			FailureCount: mh.FailureCount, LastStatus: mh.LastStatus,
+			LastReason: mh.LastReason, LastFailedAt: mh.LastFailedAt,
+		})
 	}
 	return out
 }

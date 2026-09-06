@@ -484,13 +484,20 @@ func (s *Server) groupModelIDs(r *http.Request) ([]string, int, error) {
 	}
 	wg.Wait()
 	seen := make(map[string]bool)
+	available := make(map[string]bool)
 	var ids []string
-	for _, models := range perUpstream {
+	for index, models := range perUpstream {
+		upstreamID := ups[index].ID
 		for _, m := range models {
-			if !seen[m] {
-				seen[m] = true
-				ids = append(ids, m)
+			seen[m] = true
+			if !s.health.IsModelUnsupported(upstreamID, m) {
+				available[m] = true
 			}
+		}
+	}
+	for m := range seen {
+		if available[m] {
+			ids = append(ids, m)
 		}
 	}
 	sort.Strings(ids)
@@ -545,7 +552,7 @@ func (s *Server) upstreamModels(ctx context.Context, u *upstream.Upstream) []str
 	if err != nil {
 		models = ent.models // 失败回退到旧缓存（无则 nil）
 	} else {
-		s.health.MarkModelsSupported(u.ID, models)
+		s.health.MarkModelsDiscovered(u.ID, models)
 	}
 	s.modelMu.Lock()
 	if err == nil {

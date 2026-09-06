@@ -53,7 +53,7 @@ func (s *Server) getRuntimeSettings(w http.ResponseWriter) {
 		"routing_min_samples": "20", "routing_max_ttft_ms": "0", "routing_max_duration_ms": "0",
 		"routing_allow_unknown_price": "false", "routing_exploration_rate": "0.02",
 		"breaker_recovery_successes": "2", "breaker_max_cooldown": "5m",
-		"model_unsupported_ttl": "5m", "billing_snapshot_retention_days": "0",
+		"model_unsupported_ttl": "0s", "billing_snapshot_retention_days": "0",
 		"probe_retention_hours": "0",
 	}
 
@@ -354,7 +354,7 @@ func validateRuntimeSettings(values map[string]string) error {
 		floatRange("routing_exploration_rate", 0, 1, "探索率须为 0~1"),
 		intRange("breaker_recovery_successes", 1, 100, "熔断恢复成功次数须为 1~100"),
 		durationRange("breaker_max_cooldown", time.Second, 24*time.Hour, "最大熔断冷却须在 1 秒到 24 小时之间"),
-		durationRange("model_unsupported_ttl", time.Second, 24*time.Hour, "模型不支持缓存须在 1 秒到 24 小时之间"),
+		durationRange("model_unsupported_ttl", 0, 24*time.Hour, "模型不支持缓存须在 0 秒到 24 小时之间，0 表示永久排除"),
 		intRange("billing_snapshot_retention_days", 0, 3650, "计费快照保留天数须为 0~3650"),
 		intRange("probe_retention_hours", 0, 87600, "探测记录保留小时须为 0~87600"),
 	}
