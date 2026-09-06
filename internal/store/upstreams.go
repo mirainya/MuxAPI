@@ -346,6 +346,9 @@ func (s *Store) Delete(id int64) error {
 		if err := tx.Where("upstream_id = ?", id).Delete(&MonitorModel{}).Error; err != nil {
 			return err
 		}
+		if err := tx.Where("upstream_id = ?", id).Delete(&ModelExclusion{}).Error; err != nil {
+			return err
+		}
 		return tx.Delete(&UpstreamModel{}, id).Error
 	})
 }

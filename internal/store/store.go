@@ -104,6 +104,7 @@ func allModels() []any {
 		&UpstreamPrefixCacheStatsModel{},
 		&ModelMappingModel{},
 		&UpstreamModelEntry{},
+		&ModelExclusion{},
 	}
 }
 

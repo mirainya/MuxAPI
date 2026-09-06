@@ -146,3 +146,18 @@ type UpstreamModelEntry struct {
 }
 
 func (UpstreamModelEntry) TableName() string { return "upstream_models" }
+
+// ModelExclusion is one durable negative capability observation for an
+// upstream/model pair. A nil ExcludedUntil means the exclusion is permanent.
+type ModelExclusion struct {
+	UpstreamID    int64      `gorm:"column:upstream_id;primaryKey" json:"upstream_id"`
+	Model         string     `gorm:"primaryKey" json:"model"`
+	ExcludedUntil *time.Time `gorm:"column:excluded_until" json:"excluded_until,omitempty"`
+	FailureCount  int        `gorm:"column:failure_count;not null;default:1" json:"failure_count"`
+	LastStatus    int        `gorm:"column:last_status;not null;default:0" json:"last_status"`
+	LastReason    string     `gorm:"column:last_reason;type:text;not null;default:''" json:"last_reason"`
+	LastFailedAt  time.Time  `gorm:"column:last_failed_at;not null" json:"last_failed_at"`
+	UpdatedAt     time.Time  `gorm:"column:updated_at;not null" json:"updated_at"`
+}
+
+func (ModelExclusion) TableName() string { return "upstream_model_exclusions" }
