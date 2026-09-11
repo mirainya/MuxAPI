@@ -370,7 +370,7 @@ func (f *Forwarder) Forward(w http.ResponseWriter, r *http.Request, body []byte,
 		var err error
 		if picker, ok := f.picker.(FeaturePicker); ok {
 			candidate, lease, decision, err = picker.PickWithFeatures(groupID, model, features, tried)
-			if err == nil && routeDecision == nil && decision.SelectedID != 0 {
+			if routeDecision == nil && (decision.SelectedID != 0 || len(decision.Evaluations) > 0) {
 				copyDecision := decision
 				routeDecision = &copyDecision
 			}
@@ -403,11 +403,16 @@ func (f *Forwarder) Forward(w http.ResponseWriter, r *http.Request, body []byte,
 		if routeDecision != nil && attemptNo == 1 {
 			selectionReason = routeDecision.Reason
 		}
+		attemptRouteDecision := routeDecision
+		if decision.SelectedID != 0 {
+			copyDecision := decision
+			attemptRouteDecision = &copyDecision
+		}
 		attemptCtx := attemptContext{
 			number: attemptNo, protocol: candidate.Protocol, upstreamID: candidate.ID,
 			priority:        candidate.Priority,
 			selectionReason: selectionReason, healthBefore: beforeState, started: attemptStarted,
-			keyHash: hashUpstreamKey(candidate.APIKey), routeDecision: routeDecision,
+			keyHash: hashUpstreamKey(candidate.APIKey), routeDecision: attemptRouteDecision,
 		}
 
 		// 每次换源都从原始客户端请求重新转换，不能复用上一上游的请求体。

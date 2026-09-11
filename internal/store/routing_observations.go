@@ -152,6 +152,8 @@ type PrefixCacheStats struct {
 	WindowObservations int64   `json:"window_observations"`
 	WindowHitCount     int64   `json:"window_hit_count"`
 	WindowMissCount    int64   `json:"window_miss_count"`
+	WindowCreateCount  int64   `json:"window_create_count"`
+	WindowCreateTokens int64   `json:"window_create_tokens"`
 	WindowHitRate      float64 `json:"window_hit_rate"`
 	LastHitAt          int64   `json:"last_hit_at,omitempty"`
 	LastMissAt         int64   `json:"last_miss_at,omitempty"`
@@ -551,11 +553,13 @@ func (s *Store) GetPrefixCacheStats(apiKeyHash string, upstreamID int64, model, 
 	from := now.Add(-window)
 	if err := s.queryRow(`SELECT COUNT(*),
 		COALESCE(SUM(CASE WHEN cache_eligible=TRUE AND cache_hit=TRUE THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN cache_eligible=TRUE AND cache_hit=FALSE THEN 1 ELSE 0 END),0)
+		COALESCE(SUM(CASE WHEN cache_eligible=TRUE AND cache_hit=FALSE THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN cache_created=TRUE THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(cache_creation_tokens),0)
 		FROM routing_observations WHERE api_key_hash=? AND upstream_id=? AND model=? AND prefix_hash=?
 		AND observed_at>=? AND observed_at<?`, apiKeyHash, upstreamID, model, prefixHash,
 		s.timeValue(from), s.timeValue(now)).Scan(&stats.WindowObservations, &stats.WindowHitCount,
-		&stats.WindowMissCount); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		&stats.WindowMissCount, &stats.WindowCreateCount, &stats.WindowCreateTokens); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return stats, err
 	}
 	stats.WindowHitRate = routingRatio(stats.WindowHitCount, stats.WindowHitCount+stats.WindowMissCount)
@@ -578,6 +582,7 @@ func (s *Store) getSessionCacheStats(apiKeyHash string, upstreamID int64, model,
 		COALESCE(SUM(CASE WHEN cache_hit THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN cache_eligible AND NOT cache_hit THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN cache_created THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(cache_creation_tokens),0),
 		COALESCE(MAX(prefix_tokens),0),
 		COALESCE(MAX(CASE WHEN cache_hit THEN `+s.unixExpr("observed_at")+` ELSE 0 END),0),
 		COALESCE(MAX(CASE WHEN cache_created THEN `+s.unixExpr("observed_at")+` ELSE 0 END),0),
@@ -589,7 +594,7 @@ func (s *Store) getSessionCacheStats(apiKeyHash string, upstreamID int64, model,
 		apiKeyHash, upstreamID, model, sessionKey,
 		s.timeValue(from), s.timeValue(now)).Scan(
 		&stats.WindowObservations, &stats.WindowHitCount, &stats.WindowMissCount,
-		&stats.CreateCount, &stats.PrefixTokens, &stats.LastHitAt, &stats.LastCreatedAt,
+		&stats.WindowCreateCount, &stats.WindowCreateTokens, &stats.PrefixTokens, &stats.LastHitAt, &stats.LastCreatedAt,
 		&stats.FirstSeenAt)
 	if err != nil {
 		return stats, err
@@ -604,6 +609,7 @@ func (s *Store) getSessionCacheStats(apiKeyHash string, upstreamID int64, model,
 			COALESCE(SUM(CASE WHEN cache_hit THEN 1 ELSE 0 END),0),
 			COALESCE(SUM(CASE WHEN cache_eligible AND NOT cache_hit THEN 1 ELSE 0 END),0),
 			COALESCE(SUM(CASE WHEN cache_created THEN 1 ELSE 0 END),0),
+			COALESCE(SUM(cache_creation_tokens),0),
 			COALESCE(MAX(prefix_tokens),0),
 			COALESCE(MAX(CASE WHEN cache_hit THEN `+s.unixExpr("observed_at")+` ELSE 0 END),0),
 			COALESCE(MAX(CASE WHEN cache_created THEN `+s.unixExpr("observed_at")+` ELSE 0 END),0),
@@ -613,7 +619,7 @@ func (s *Store) getSessionCacheStats(apiKeyHash string, upstreamID int64, model,
 			AND success=TRUE`,
 			apiKeyHash, upstreamID, model, sessionKey).Scan(
 			&stats.WindowObservations, &stats.WindowHitCount, &stats.WindowMissCount,
-			&stats.CreateCount, &stats.PrefixTokens, &stats.LastHitAt, &stats.LastCreatedAt,
+			&stats.WindowCreateCount, &stats.WindowCreateTokens, &stats.PrefixTokens, &stats.LastHitAt, &stats.LastCreatedAt,
 			&stats.FirstSeenAt)
 		if err != nil {
 			return stats, err
@@ -625,6 +631,7 @@ func (s *Store) getSessionCacheStats(apiKeyHash string, upstreamID int64, model,
 	stats.Observations = stats.WindowObservations
 	stats.HitCount = stats.WindowHitCount
 	stats.MissCount = stats.WindowMissCount
+	stats.CreateCount = stats.WindowCreateCount
 	stats.HitRate = routingRatio(stats.HitCount, stats.HitCount+stats.MissCount)
 	stats.WindowHitRate = stats.HitRate
 	if stats.LastHitAt > 0 || stats.LastCreatedAt > 0 {

@@ -169,11 +169,15 @@ type CacheProfile struct {
 	MinTokens     int64         `json:"min_tokens,omitempty"`
 	HitRate       float64       `json:"hit_rate"`
 	HitRateSource HitRateSource `json:"hit_rate_source"`
+	// Cache reads and writes can happen in the same rolling conversation.
+	CreateRate             float64 `json:"create_rate,omitempty"`
+	CreateTokensPerRequest float64 `json:"create_tokens_per_request,omitempty"`
+	CacheWriteObserved     bool    `json:"cache_write_observed,omitempty"`
 	// CoverageRatio is the fraction of the reusable prefix that the upstream
 	// actually caches. Some proxied upstreams only cache ~77% of the prefix.
 	// 0 or 1 means assume full prefix is cached (the standard behavior).
-	CoverageRatio float64 `json:"coverage_ratio,omitempty"`
-	Existing       CacheEntry `json:"existing"`
+	CoverageRatio float64    `json:"coverage_ratio,omitempty"`
+	Existing      CacheEntry `json:"existing"`
 	// PreferredTTL is the adaptive TTL selected by the scheduler based on
 	// session behavior. When longer than the default 5min, the forwarder may
 	// inject cache_control hints into the upstream request.

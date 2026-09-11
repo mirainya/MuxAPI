@@ -66,25 +66,27 @@ type Request struct {
 
 // CandidateEvaluation explains why one candidate was selected or rejected.
 type CandidateEvaluation struct {
-	CandidateID      int64        `json:"candidate_id"`
-	CandidateName    string       `json:"candidate_name"`
-	Protocol         string       `json:"protocol,omitempty"`
-	Eligible         bool         `json:"eligible"`
-	RejectReason     string       `json:"reject_reason,omitempty"`
-	Cost             CostEstimate `json:"cost"`
-	EffectiveCost    float64      `json:"effective_cost"`
-	LatencyScore     float64      `json:"latency_score"`
-	ReliabilityScore float64      `json:"reliability_score"`
-	P95TTFTMs        float64      `json:"p95_ttft_ms"`
-	P95DurationMs    float64      `json:"p95_duration_ms"`
-	SuccessRate      float64      `json:"success_rate"`
-	PricingSource    string       `json:"pricing_source,omitempty"`
-	CacheExisting    bool         `json:"cache_existing"`
-	CacheHitRate     float64      `json:"cache_hit_rate"`
-	TieScore         float64      `json:"tie_score"`
-	Priority         int          `json:"priority"`
-	Samples          int64        `json:"samples"`
-	Explanation      string       `json:"explanation,omitempty"`
+	CandidateID          int64        `json:"candidate_id"`
+	CandidateName        string       `json:"candidate_name"`
+	Protocol             string       `json:"protocol,omitempty"`
+	Eligible             bool         `json:"eligible"`
+	RejectReason         string       `json:"reject_reason,omitempty"`
+	Cost                 CostEstimate `json:"cost"`
+	EffectiveCost        float64      `json:"effective_cost"`
+	LatencyScore         float64      `json:"latency_score"`
+	ReliabilityScore     float64      `json:"reliability_score"`
+	P95TTFTMs            float64      `json:"p95_ttft_ms"`
+	P95DurationMs        float64      `json:"p95_duration_ms"`
+	SuccessRate          float64      `json:"success_rate"`
+	EffectiveSuccessRate float64      `json:"effective_success_rate"`
+	Price                Pricing      `json:"price"`
+	PricingSource        string       `json:"pricing_source,omitempty"`
+	CacheExisting        bool         `json:"cache_existing"`
+	CacheHitRate         float64      `json:"cache_hit_rate"`
+	TieScore             float64      `json:"tie_score"`
+	Priority             int          `json:"priority"`
+	Samples              int64        `json:"samples"`
+	Explanation          string       `json:"explanation,omitempty"`
 }
 
 // Decision contains the winner and every candidate's auditable evaluation.
@@ -125,7 +127,7 @@ func Choose(request Request) (Decision, error) {
 			CandidateID: candidate.ID, CandidateName: candidate.Name, Protocol: candidate.Protocol,
 			Priority: candidate.Priority, Samples: performance.Samples,
 			P95TTFTMs: performance.P95TTFTMs, P95DurationMs: performance.P95DurationMs,
-			SuccessRate: performance.SuccessRate, PricingSource: candidate.Price.Source,
+			SuccessRate: performance.SuccessRate, Price: candidate.Price.Normalized(), PricingSource: candidate.Price.Source,
 			CacheExisting: candidate.Cache.Existing.Valid, CacheHitRate: candidate.Cache.HitRate,
 		}
 		switch {
@@ -148,14 +150,21 @@ func Choose(request Request) (Decision, error) {
 				evaluation.Eligible = true
 				evaluation.EffectiveCost = evaluation.Cost.SelectedTotal
 				// Expected spend per successful completion captures retry costs.
-				// Require samples so an unset zero success rate is not interpreted
-				// as a channel that can never succeed.
-				if performance.Samples > 0 && performance.Samples >= cfg.MinSamples {
-					if performance.SuccessRate <= 0 {
+				// Before MinSamples, use one virtual success: a recovering channel
+				// remains selectable, but each observed failure immediately raises
+				// its expected cost instead of looking identical to an unseen one.
+				if performance.Samples > 0 {
+					effectiveSuccessRate := performance.SuccessRate
+					if performance.Samples < cfg.MinSamples {
+						effectiveSuccessRate = (performance.SuccessRate*float64(performance.Samples) + 1) /
+							(float64(performance.Samples) + 1)
+					}
+					evaluation.EffectiveSuccessRate = effectiveSuccessRate
+					if effectiveSuccessRate <= 0 {
 						evaluation.Eligible = false
 						evaluation.RejectReason = "observed success rate is zero"
 					} else {
-						evaluation.EffectiveCost /= performance.SuccessRate
+						evaluation.EffectiveCost /= effectiveSuccessRate
 					}
 				}
 			}

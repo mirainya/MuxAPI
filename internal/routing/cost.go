@@ -46,11 +46,40 @@ type CostEstimate struct {
 	Warnings           []string      `json:"warnings,omitempty"`
 }
 
+// EstimateActualCost prices observed usage. inputTokens is assumed to be the
+// uncached prompt total under Anthropic semantics — audit.parseUsageObject
+// normalizes OpenAI/Gemini prompt_tokens (which are inclusive of cached) at
+// ingest time, so callers should pass the stored routing_observations.input
+// value directly. The protocol argument is accepted for backward compatibility
+// and future protocol-specific pricing quirks but no longer used for token
+// arithmetic.
+func EstimateActualCost(price Pricing, protocol string, inputTokens, outputTokens,
+	cachedTokens, cacheCreationTokens int64) (float64, bool) {
+	_ = protocol
+	if inputTokens < 0 || outputTokens < 0 || cachedTokens < 0 || cacheCreationTokens < 0 {
+		return 0, false
+	}
+	if inputTokens == 0 && outputTokens == 0 && cachedTokens == 0 && cacheCreationTokens == 0 {
+		return 0, false
+	}
+	price = price.Normalized()
+	if (inputTokens > 0 && !price.InputKnown) || (outputTokens > 0 && !price.OutputKnown) ||
+		(cachedTokens > 0 && !price.CacheReadKnown) ||
+		(cacheCreationTokens > 0 && !price.CacheWriteKnown) {
+		return 0, false
+	}
+	cost := float64(inputTokens)*price.InputPerToken +
+		float64(outputTokens)*price.OutputPerToken +
+		float64(cachedTokens)*price.CacheReadPerToken +
+		float64(cacheCreationTokens)*price.CacheWritePerToken
+	return cost * price.Multiplier, true
+}
+
 // EstimateWindowCost computes both strategies for the expected request
 // window. The cache strategy assumes a cache write replaces ordinary input
 // billing for the reusable prefix unless the profile explicitly says
-// otherwise. A cache miss creates a new entry, so observed hit rate directly
-// controls expected write/read counts after each TTL lifetime.
+// otherwise. Cache reads and writes are independent: rolling conversations may
+// report both cached and cache_creation tokens in one request.
 func EstimateWindowCost(features RequestFeatures, forecast TrafficForecast, pricing Pricing, cache CacheProfile, now time.Time, defaultWindow time.Duration) CostEstimate {
 	features = features.Normalize()
 	forecast = forecast.normalized(features, defaultWindow)
@@ -82,7 +111,8 @@ func EstimateWindowCost(features RequestFeatures, forecast TrafficForecast, pric
 		prefix = 0
 	}
 	// CoverageRatio models upstreams that only cache a fraction of the prefix.
-	// The uncached portion is billed at full input price even on hits.
+	// The uncached portion is billed at full input price even on hits. It also
+	// applies to the inflation tokens the upstream injects around the prefix.
 	coverage := cache.CoverageRatio
 	if coverage <= 0 || coverage > 1 || math.IsNaN(coverage) || math.IsInf(coverage, 0) {
 		coverage = 1
@@ -208,10 +238,24 @@ func EstimateWindowCost(features RequestFeatures, forecast TrafficForecast, pric
 	result.ExpectedHits = hits
 	result.ExpectedMisses = misses
 	result.ExpectedCreates = misses
+	// cachedPortion covers reusable prefix AND upstream-injected inflation.
+	// Both are stable across the session and share the provider cache lifecycle.
+	writeTokens := misses * cachedPortion
+	if cache.CacheWriteObserved {
+		observedCreates := n * cache.CreateRate
+		if observedCreates > result.ExpectedCreates {
+			result.ExpectedCreates = observedCreates
+		}
+		observedWriteTokens := n * cache.CreateTokensPerRequest
+		if observedWriteTokens > writeTokens {
+			writeTokens = observedWriteTokens
+			result.Warnings = append(result.Warnings, "cache writes overlap hits; using observed rolling write-token rate")
+		}
+	}
 	result.CacheLifetimes = lifetimes
 
 	result.CacheReadCost = hits * cachedPortion * pricing.CacheReadPerToken * multiplier
-	result.CacheWriteCost = misses * cachedPortion * pricing.CacheWritePerToken * multiplier
+	result.CacheWriteCost = writeTokens * pricing.CacheWritePerToken * multiplier
 	// true suffix (new user turn) + uncached portion of prefix+inflation always
 	// pay full input price. Inflation tokens ONLY appear at full input price via
 	// the uncached share of coverage; the cached share flows through read/write.
@@ -220,7 +264,7 @@ func EstimateWindowCost(features RequestFeatures, forecast TrafficForecast, pric
 		result.CacheReadCost += hits * cachedPortion * input * multiplier
 	}
 	if cache.CacheWriteIncludesInput {
-		result.CacheWriteCost += misses * cachedPortion * input * multiplier
+		result.CacheWriteCost += writeTokens * input * multiplier
 	}
 	result.CacheTotal = result.CacheInputCost + result.CacheReadCost + result.CacheWriteCost + result.OutputCost
 	result.SelectedTotal = result.NoCacheTotal
@@ -323,6 +367,16 @@ func breakEvenRequests(features RequestFeatures, forecast TrafficForecast, prici
 	}
 	// Expected subsequent request cost at the observed hit rate.
 	steady := h*hit + (1-h)*miss
+	if cache.CacheWriteObserved {
+		observedWriteTokens := cache.CreateTokensPerRequest
+		modeledWriteTokens := (1 - h) * cachedPortion
+		if observedWriteTokens > modeledWriteTokens {
+			steady += (observedWriteTokens - modeledWriteTokens) * pricing.CacheWritePerToken * multiplier
+			if cache.CacheWriteIncludesInput {
+				steady += (observedWriteTokens - modeledWriteTokens) * pricing.InputPerToken * multiplier
+			}
+		}
+	}
 	denominator := noCache - steady
 	if denominator <= 0 {
 		return -1

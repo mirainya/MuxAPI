@@ -142,6 +142,30 @@ func TestRoutingObservationStatsAndCacheIsolation(t *testing.T) {
 	}
 }
 
+func TestSessionCacheStatsExposeRollingWrites(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "session-cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Now().Truncate(time.Second)
+	observations := []RoutingObservationRecord{
+		{RequestID: "session-1", UpstreamID: 7, APIKeyHash: "key-a", Model: "m", SessionKey: "session-a", PrefixHash: "prefix-1", PrefixTokens: 1000,
+			CachedTokens: 700, CacheCreationTokens: 300, CacheEligible: true, CacheHit: true, CacheCreated: true, Success: true, ObservedAt: now.Add(-2 * time.Minute)},
+		{RequestID: "session-2", UpstreamID: 7, APIKeyHash: "key-a", Model: "m", SessionKey: "session-a", PrefixHash: "prefix-2", PrefixTokens: 1200,
+			CacheCreationTokens: 1200, CacheEligible: true, CacheCreated: true, Success: true, ObservedAt: now.Add(-time.Minute)},
+	}
+	if err := st.SaveRoutingObservations(observations); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := st.GetPrefixCacheStats("key-a", 7, "m", "session-a", "claude", 15*time.Minute, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.WindowCreateCount != 2 || stats.WindowCreateTokens != 1500 || stats.HitCount != 1 || stats.MissCount != 1 {
+		t.Fatalf("rolling session cache writes were not aggregated: %+v", stats)
+	}
+}
 
 // AssumedCacheTTL must mirror routing.selectAdaptiveTTL exactly, otherwise the
 // store fallback would stamp an ExpiresAt derived from a wrong TTL and the

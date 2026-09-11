@@ -43,38 +43,55 @@ const (
 // All timestamps are Unix seconds (0 = unknown). The caller fetches these from
 // the store layer; this function is a pure deterministic transform.
 type CacheStateParams struct {
-	Supported     bool
-	CacheMode     string // "enabled" / "auto" / "disabled"
-	Observations  int64
-	HitCount      int64
-	MissCount     int64
-	CreateCount   int64
-	PrefixTokens  int64
-	ExpiresAt     int64 // unix seconds, 0 = unknown
-	FirstSeenAt   int64 // unix seconds
-	LastHitAt     int64 // unix seconds
-	CoverageRatio float64
-	Protocol      string // "gemini" forces 1h TTL
+	Supported          bool
+	CacheMode          string // "enabled" / "auto" / "disabled"
+	Observations       int64
+	HitCount           int64
+	MissCount          int64
+	CreateCount        int64
+	WindowCreateCount  int64
+	WindowCreateTokens int64
+	PrefixTokens       int64
+	ExpiresAt          int64 // unix seconds, 0 = unknown
+	FirstSeenAt        int64 // unix seconds
+	LastHitAt          int64 // unix seconds
+	CoverageRatio      float64
+	Protocol           string // "gemini" forces 1h TTL
 }
 
 // SessionCache is the resolved cache state for one session on one upstream.
 type SessionCache struct {
-	State         SessionCacheState
-	ExpiresAt     time.Time
-	HitRate       float64
-	HitRateSource HitRateSource
-	CoverageRatio float64
-	CreateCount   int64
-	PrefixTokens  int64
-	PreferredTTL  time.Duration
+	State                  SessionCacheState
+	ExpiresAt              time.Time
+	HitRate                float64
+	HitRateSource          HitRateSource
+	CoverageRatio          float64
+	CreateCount            int64
+	CreateRate             float64
+	CreateTokensPerRequest float64
+	CacheWriteObserved     bool
+	PrefixTokens           int64
+	PreferredTTL           time.Duration
 }
 
 // ResolveSessionCache determines the cache state from raw observations.
 func ResolveSessionCache(params CacheStateParams, now time.Time) SessionCache {
 	sc := SessionCache{
-		CoverageRatio: params.CoverageRatio,
-		CreateCount:   params.CreateCount,
-		PrefixTokens:  params.PrefixTokens,
+		CoverageRatio:      params.CoverageRatio,
+		CreateCount:        params.CreateCount,
+		CacheWriteObserved: params.Observations > 0 && (params.HitCount+params.MissCount > 0),
+		PrefixTokens:       params.PrefixTokens,
+	}
+	eligible := params.HitCount + params.MissCount
+	if eligible > 0 {
+		sc.CreateRate = float64(params.WindowCreateCount) / float64(eligible)
+		sc.CreateTokensPerRequest = float64(params.WindowCreateTokens) / float64(eligible)
+		if sc.CreateRate < 0 {
+			sc.CreateRate = 0
+		}
+		if sc.CreateRate > 1 {
+			sc.CreateRate = 1
+		}
 	}
 
 	if !params.Supported {
@@ -162,13 +179,16 @@ func (sc SessionCache) ToCacheProfile() CacheProfile {
 	}
 
 	profile := CacheProfile{
-		Supported:     true,
-		TTL:           sc.PreferredTTL,
-		MinTokens:     1024,
-		HitRate:       sc.HitRate,
-		HitRateSource: sc.HitRateSource,
-		CoverageRatio: sc.CoverageRatio,
-		PreferredTTL:  sc.PreferredTTL,
+		Supported:              true,
+		TTL:                    sc.PreferredTTL,
+		MinTokens:              1024,
+		HitRate:                sc.HitRate,
+		HitRateSource:          sc.HitRateSource,
+		CoverageRatio:          sc.CoverageRatio,
+		PreferredTTL:           sc.PreferredTTL,
+		CreateRate:             sc.CreateRate,
+		CreateTokensPerRequest: sc.CreateTokensPerRequest,
+		CacheWriteObserved:     sc.CacheWriteObserved,
 	}
 
 	switch sc.State {

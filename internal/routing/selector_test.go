@@ -116,6 +116,41 @@ func TestChooseAccountsForFailureRetryCost(t *testing.T) {
 	}
 }
 
+func TestChoosePenalizesFailuresBeforeMinimumSamples(t *testing.T) {
+	unreliable := healthyCandidate(1, "cold failing", 0, basePrice(0.6e-6))
+	unreliable.Performance = Performance{Samples: 2, SuccessRate: 0}
+	reliable := healthyCandidate(2, "reliable", 0, basePrice(1e-6))
+	reliable.Performance = Performance{Samples: 100, SuccessRate: 1}
+	decision, err := Choose(Request{
+		Features: RequestFeatures{InputTokens: 10_000}, Candidates: []Candidate{unreliable, reliable},
+		Config: DefaultConfig(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.SelectedID != reliable.ID {
+		t.Fatalf("two cold-start failures should raise retry-adjusted cost: %+v", decision)
+	}
+	if got := decision.Evaluations[0].EffectiveSuccessRate; got != 1.0/3.0 {
+		t.Fatalf("effective success rate = %v, want 1/3", got)
+	}
+}
+
+func TestChooseKeepsRecoveringCandidateEligibleBeforeMinimumSamples(t *testing.T) {
+	candidate := healthyCandidate(1, "recovering", 0, basePrice(1e-6))
+	candidate.Performance = Performance{Samples: 3, SuccessRate: 0}
+	decision, err := Choose(Request{
+		Features: RequestFeatures{InputTokens: 10_000}, Candidates: []Candidate{candidate},
+		Config: DefaultConfig(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.SelectedID != candidate.ID || decision.Evaluations[0].EffectiveSuccessRate != 0.25 {
+		t.Fatalf("recovering candidate should retain a bounded trial path: %+v", decision)
+	}
+}
+
 func TestSelectorWrapperPick(t *testing.T) {
 	selector := NewSelector(DefaultConfig())
 	selected, decision, err := selector.Pick(Request{

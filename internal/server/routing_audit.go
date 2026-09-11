@@ -17,7 +17,14 @@ func (s *Server) persistRoutingAudit(requestID string, started time.Time, groupI
 
 	// Emit structured audit log for every request (JSON, greppable by "route_audit").
 	s.emitRouteAuditLog(requestID, started, model, endpoint, features, decision, result)
-	if decision != nil && decision.SelectedID != 0 {
+	if decision != nil && (decision.SelectedID != 0 || len(decision.Evaluations) > 0) {
+		var selectedCost, noCacheCost, cacheCost, estimatedSavings *float64
+		if decision.SelectedID != 0 {
+			selectedCost = floatPtr(decision.EffectiveCost)
+			noCacheCost = floatPtr(decision.Cost.NoCacheTotal)
+			cacheCost = floatPtr(decision.Cost.CacheTotal)
+			estimatedSavings = floatPtr(decision.EstimatedSavings)
+		}
 		record := store.RouteDecisionRecord{
 			RequestID: requestID, GroupID: groupID, Model: model, Protocol: features.Protocol,
 			Endpoint: endpoint, SessionKey: features.SessionID, PrefixHash: features.CacheKey,
@@ -25,8 +32,8 @@ func (s *Server) persistRoutingAudit(requestID string, started time.Time, groupI
 			SelectedUpstreamID: decision.SelectedID, ForecastWindow: decision.Forecast.Window,
 			ForecastRequests: decision.Forecast.Requests, EstimatedInputTokens: features.InputTokens,
 			ReusablePrefixTokens: features.ReusableInputTokens, EstimatedOutputTokens: features.EstimatedOutputTokens,
-			SelectedCost: floatPtr(decision.EffectiveCost), NoCacheCost: floatPtr(decision.Cost.NoCacheTotal),
-			CacheCost: floatPtr(decision.Cost.CacheTotal), EstimatedSavings: floatPtr(decision.EstimatedSavings),
+			SelectedCost: selectedCost, NoCacheCost: noCacheCost,
+			CacheCost: cacheCost, EstimatedSavings: estimatedSavings,
 			Confidence: decision.Confidence, CacheSelected: decision.Cost.CacheUsed, Exploration: decision.Exploration, CreatedAt: started,
 		}
 		for _, evaluation := range decision.Evaluations {
@@ -52,6 +59,7 @@ func (s *Server) persistRoutingAudit(requestID string, started time.Time, groupI
 			slog.Warn("save route decision failed", "request_id", requestID, "err", err)
 		} else {
 			_ = id
+			actualCost := actualRouteCost(result.Attempts)
 			// ActualUpstreamID may differ from SelectedUpstreamID when the
 			// initial pick failed and a failover attempt succeeded. Persist
 			// it so downstream analysis can distinguish 'was picked' from
@@ -59,6 +67,7 @@ func (s *Server) persistRoutingAudit(requestID string, started time.Time, groupI
 			// selected_upstream_id misattributes failover requests to the
 			// upstream that failed.
 			complete := store.RouteDecisionOutcome{
+				ActualCost:        actualCost,
 				ActualInputTokens: optionalInt64Ptr(result.InputTokens), ActualOutputTokens: optionalInt64Ptr(result.OutputTokens),
 				ActualCachedTokens: optionalInt64Ptr(result.CachedTokens), ActualCacheCreationTokens: optionalInt64Ptr(result.CacheCreationTokens),
 				ActualUpstreamID: result.FinalUpstreamID,
@@ -98,6 +107,35 @@ func (s *Server) persistRoutingAudit(requestID string, started time.Time, groupI
 	}
 }
 
+func actualRouteCost(attempts []forward.AttemptResult) *float64 {
+	var total float64
+	found := false
+	for _, attempt := range attempts {
+		if attempt.Outcome != forward.OutcomeSuccess && attempt.Outcome != forward.OutcomePartial {
+			continue
+		}
+		if attempt.RouteDecision == nil {
+			continue
+		}
+		for _, evaluation := range attempt.RouteDecision.Evaluations {
+			if evaluation.CandidateID != attempt.UpstreamID {
+				continue
+			}
+			cost, ok := routing.EstimateActualCost(evaluation.Price, attempt.Protocol,
+				attempt.InputTokens, attempt.OutputTokens, attempt.CachedTokens, attempt.CacheCreationTokens)
+			if ok {
+				total += cost
+				found = true
+			}
+			break
+		}
+	}
+	if !found {
+		return nil
+	}
+	return &total
+}
+
 func routingAttemptSucceeded(outcome string) bool {
 	switch outcome {
 	case forward.OutcomeFailed, forward.OutcomePartial:
@@ -130,19 +168,19 @@ func cacheTTLForProtocol(protocol string) time.Duration {
 
 func (s *Server) emitRouteAuditLog(requestID string, started time.Time, model, endpoint string, features routing.RequestFeatures, decision *routing.Decision, result forward.Result) {
 	entry := map[string]any{
-		"type":       "route_audit",
-		"request_id": requestID,
-		"ts":         started.UnixMilli(),
-		"model":      model,
-		"endpoint":   endpoint,
-		"session_id": features.SessionID,
-		"outcome":    result.Outcome,
-		"status":     result.Status,
-		"ttft_ms":    result.TTFTMs,
-		"duration_ms": time.Since(started).Milliseconds(),
-		"input_tokens":  result.InputTokens,
-		"output_tokens": result.OutputTokens,
-		"cached_tokens": result.CachedTokens,
+		"type":                  "route_audit",
+		"request_id":            requestID,
+		"ts":                    started.UnixMilli(),
+		"model":                 model,
+		"endpoint":              endpoint,
+		"session_id":            features.SessionID,
+		"outcome":               result.Outcome,
+		"status":                result.Status,
+		"ttft_ms":               result.TTFTMs,
+		"duration_ms":           time.Since(started).Milliseconds(),
+		"input_tokens":          result.InputTokens,
+		"output_tokens":         result.OutputTokens,
+		"cached_tokens":         result.CachedTokens,
 		"cache_creation_tokens": result.CacheCreationTokens,
 		"features": map[string]any{
 			"input_tokens":    features.InputTokens,
@@ -194,29 +232,29 @@ func (s *Server) emitRouteAuditLog(requestID string, started time.Time, model, e
 		}
 		entry["candidates_summary"] = candidates
 		entry["decision"] = map[string]any{
-			"selected_id":      decision.SelectedID,
-			"selected_name":    decision.SelectedName,
-			"reason":           decision.Reason,
-			"effective_cost":   decision.EffectiveCost,
-			"confidence":       decision.Confidence,
-			"exploration":      decision.Exploration,
-			"runner_up_id":     decision.RunnerUpID,
+			"selected_id":       decision.SelectedID,
+			"selected_name":     decision.SelectedName,
+			"reason":            decision.Reason,
+			"effective_cost":    decision.EffectiveCost,
+			"confidence":        decision.Confidence,
+			"exploration":       decision.Exploration,
+			"runner_up_id":      decision.RunnerUpID,
 			"estimated_savings": decision.EstimatedSavings,
 			"forecast_requests": decision.Forecast.Requests,
-			"forecast_rpm":     decision.Forecast.RequestsPerMinute,
-			"cache_used":       decision.Cost.CacheUsed,
-			"break_even":       decision.Cost.BreakEvenRequests,
+			"forecast_rpm":      decision.Forecast.RequestsPerMinute,
+			"cache_used":        decision.Cost.CacheUsed,
+			"break_even":        decision.Cost.BreakEvenRequests,
 		}
 	}
 	attempts := make([]map[string]any, 0, len(result.Attempts))
 	for _, a := range result.Attempts {
 		attempts = append(attempts, map[string]any{
-			"upstream_id": a.UpstreamID,
-			"outcome":     a.Outcome,
-			"status":      a.Status,
-			"ttft_ms":     a.TTFTMs,
-			"duration_ms": a.DurationMs,
-			"cached":      a.CachedTokens,
+			"upstream_id":   a.UpstreamID,
+			"outcome":       a.Outcome,
+			"status":        a.Status,
+			"ttft_ms":       a.TTFTMs,
+			"duration_ms":   a.DurationMs,
+			"cached":        a.CachedTokens,
 			"cache_created": a.CacheCreationTokens,
 		})
 	}

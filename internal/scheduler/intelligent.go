@@ -90,6 +90,7 @@ func (r *intelligentRouter) pick(s *Scheduler, groupID int64, model string, feat
 	if r.config != nil {
 		cfg = r.config()
 	}
+	var lastDecision routing.Decision
 	for attempts := 0; attempts < len(all); attempts++ {
 		candidates := r.candidates(s, all, model, features, blocked, now, cfg)
 		if len(candidates) == 0 {
@@ -99,6 +100,7 @@ func (r *intelligentRouter) pick(s *Scheduler, groupID int64, model string, feat
 			Features: features, Forecast: r.forecast(all, model, features, cfg, now),
 			Candidates: candidates, Config: cfg, Now: now,
 		})
+		lastDecision = decision
 		blockHardLimitRejections(blocked, decision.Evaluations, cfg)
 		if err != nil {
 			break
@@ -118,7 +120,10 @@ func (r *intelligentRouter) pick(s *Scheduler, groupID int64, model string, feat
 	// gateway unavailable. Preserve the original scheduler behavior.
 	candidate, lease, err := s.PickExcluding(groupID, model, blocked)
 	if candidate == nil || err != nil {
-		return candidate, lease, routing.Decision{}, err
+		if lastDecision.Reason == "" && len(lastDecision.Evaluations) > 0 {
+			lastDecision.Reason = "no eligible intelligent-routing candidate"
+		}
+		return candidate, lease, lastDecision, err
 	}
 	return candidate, lease, routing.Decision{
 		SelectedID: candidate.ID, SelectedName: candidate.Name,
@@ -249,6 +254,8 @@ func (r *intelligentRouter) cache(item *upstream.Upstream, model string, feature
 		params.HitCount = stats.WindowHitCount
 		params.MissCount = stats.WindowMissCount
 		params.CreateCount = stats.CreateCount
+		params.WindowCreateCount = stats.WindowCreateCount
+		params.WindowCreateTokens = stats.WindowCreateTokens
 		params.PrefixTokens = stats.PrefixTokens
 		params.ExpiresAt = stats.ExpiresAt
 		params.FirstSeenAt = stats.FirstSeenAt
