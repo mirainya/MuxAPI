@@ -2537,7 +2537,7 @@ function logout() {
               </button>
               <div v-if="!collapsedUpstreamTags.has(section.key)" class="table-wrap upstream-table-wrap">
                 <table class="upstream-table">
-                  <thead><tr><th class="select-cell"><input type="checkbox" :checked="section.rows.every(u => upstreamSelected.has(u.id))" :aria-label="`选择 ${section.name}`" @change="toggleUpstreamSectionSelection(section.rows)" /></th><th></th><th>名称</th><th>标签</th><th>地址</th><th>协议</th><th>计费</th><th>运行时</th><th>成功率</th><th>Token 膨胀（24h）</th><th>操作</th></tr></thead>
+                  <thead><tr><th class="select-cell"><input type="checkbox" :checked="section.rows.every(u => upstreamSelected.has(u.id))" :aria-label="`选择 ${section.name}`" @change="toggleUpstreamSectionSelection(section.rows)" /></th><th></th><th>名称</th><th>标签</th><th>地址</th><th>协议</th><th>计费</th><th>运行时</th><th>成功率</th><th>操作</th></tr></thead>
                   <tbody>
                     <!-- template 包两行：明细行必须与主行同处 v-for 作用域内 -->
                     <template v-for="u in section.rows" :key="u.id">
@@ -2581,11 +2581,6 @@ function logout() {
                       </td>
                       <td><span class="state-badge" :class="rtClass(u.health)">{{ u.enabled ? rtLabel(u.health) : '已停用' }}</span></td>
                       <td>{{ rtRate(u.health) }}</td>
-                      <td class="token-inflation-cell">
-                        <span v-if="u.token_inflation_samples" class="token-inflation" :class="tokenInflationClass(u)" :title="`最近 24 小时 ${u.token_inflation_samples} 个样本，实际计费输入 ÷ 客户端估算输入`">{{ tokenInflationText(u) }}</span>
-                        <span v-if="u.token_inflation_samples" class="log-sub">{{ u.token_inflation_samples }} 个样本</span>
-                        <span v-else class="tag-empty">暂无样本</span>
-                      </td>
                       <td>
                         <button v-if="u.health?.state === 'OPEN' || u.health?.state === 'HALF_OPEN'" class="icon-btn" title="手动恢复渠道" :disabled="recoveringUpstreams.has(u.id)" @click="guard(() => recoverUpstream(u))"><Icon name="refresh" :size="16" /></button>
                         <button class="btn-link sm" @click="testUpstream(u)">测试</button><button class="btn-link sm" @click="openBatchMonitors(u)">建监控</button>
@@ -2593,7 +2588,7 @@ function logout() {
                       </td>
                     </tr>
                     <tr v-if="billingDetailOpen.has(u.id)" class="billing-detail-row">
-                      <td colspan="11">
+                      <td colspan="10">
                         <div class="billing-detail">
                           <div class="billing-detail-head">
                             <strong>费用比对明细</strong>

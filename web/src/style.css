@@ -270,13 +270,12 @@ svg { display: block; flex-shrink: 0; }
 .section-select { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; color: var(--g500); font-size: 11px; cursor: pointer; }
 .section-select input { accent-color: var(--p600); }
 .upstream-table-wrap { overflow-x: auto; }
-.upstream-table { min-width: 1190px; }
+.upstream-table { min-width: 1080px; }
 .upstream-table th, .upstream-table td { padding: 10px 12px; }
 .upstream-table th { white-space: nowrap; }
 .upstream-table th:nth-child(7), .upstream-table td:nth-child(7) { min-width: 180px; }
 .upstream-table th:nth-child(8), .upstream-table td:nth-child(8) { min-width: 86px; }
 .upstream-table th:nth-child(9), .upstream-table td:nth-child(9) { min-width: 60px; }
-.upstream-table th:nth-child(10), .upstream-table td:nth-child(10) { min-width: 92px; }
 .upstream-table th:last-child, .upstream-table td:last-child { min-width: 190px; white-space: nowrap; }
 .upstream-table .cell-url { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .billing-cell { width: 215px; }
@@ -893,7 +892,6 @@ code { background: var(--g100); padding: 2px 7px; border-radius: 6px; font-size:
 .token-inflation { color: var(--state-success); font-variant-numeric: tabular-nums; }
 .token-inflation.medium { color: var(--state-warning); }
 .token-inflation.high { color: var(--state-danger); }
-.token-inflation-cell { white-space: nowrap; }
 .log-endpoint { color: var(--g700); font-family: var(--font-data); }
 .log-model i { display: inline-block; margin-left: 5px; padding: 0 4px; border: 1px solid #9ec5ff; border-radius: 3px; color: #245ea8; font-size: 9px; font-style: normal; }
 .log-status { display: inline-block; max-width: 100%; padding: 2px 7px; border-radius: 4px; font-size: 11px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
