@@ -5,40 +5,41 @@ import "time"
 // models_routing.go — GORM models for intelligent routing tables.
 
 type RouteDecisionModel struct {
-	ID                        int64      `gorm:"primaryKey;autoIncrement"`
-	RequestID                 string     `gorm:"column:request_id;type:text;not null;uniqueIndex"`
-	GroupID                   int64      `gorm:"column:group_id;type:integer;not null;default:0"`
-	Model                     string     `gorm:"type:text;not null;default:''"`
-	Protocol                  string     `gorm:"type:text;not null;default:''"`
-	Endpoint                  string     `gorm:"type:text;not null;default:''"`
-	SessionKey                string     `gorm:"column:session_key;type:text;not null;default:'';index:idx_route_decisions_session_model,priority:1"`
-	PrefixHash                string     `gorm:"column:prefix_hash;type:text;not null;default:'';index:idx_route_decisions_prefix_model,priority:1"`
-	CacheKey                  string     `gorm:"column:cache_key;type:text;not null;default:''"`
-	Strategy                  string     `gorm:"type:text;not null;default:'cost'"`
-	Reason                    string     `gorm:"type:text;not null;default:''"`
-	SelectedUpstreamID        int64      `gorm:"column:selected_upstream_id;type:integer;not null;default:0"`
-	CandidateCount            int        `gorm:"column:candidate_count;type:integer;not null;default:0"`
-	ForecastWindowSeconds     int64      `gorm:"column:forecast_window_seconds;type:integer;not null;default:0"`
-	ForecastRequests          float64    `gorm:"column:forecast_requests;type:real;not null;default:0"`
-	EstimatedInputTokens      int64      `gorm:"column:estimated_input_tokens;type:integer;not null;default:0"`
-	ReusablePrefixTokens      int64      `gorm:"column:reusable_prefix_tokens;type:integer;not null;default:0"`
-	EstimatedOutputTokens     int64      `gorm:"column:estimated_output_tokens;type:integer;not null;default:0"`
-	SelectedCost              *float64   `gorm:"column:selected_cost;type:real"`
-	NoCacheCost               *float64   `gorm:"column:no_cache_cost;type:real"`
-	CacheCost                 *float64   `gorm:"column:cache_cost;type:real"`
-	EstimatedSavings          *float64   `gorm:"column:estimated_savings;type:real"`
-	Confidence                float64    `gorm:"type:real;not null;default:0"`
-	CacheSelected             bool       `gorm:"column:cache_selected;not null;default:false"`
-	Exploration               bool       `gorm:"not null;default:false"`
-	ActualCost                *float64   `gorm:"column:actual_cost;type:real"`
-	ActualInputTokens         *int64     `gorm:"column:actual_input_tokens;type:integer"`
-	ActualOutputTokens        *int64     `gorm:"column:actual_output_tokens;type:integer"`
-	ActualCachedTokens        *int64     `gorm:"column:actual_cached_tokens;type:integer"`
-	ActualCacheCreationTokens *int64     `gorm:"column:actual_cache_creation_tokens;type:integer"`
-	ActualUpstreamID          int64      `gorm:"column:actual_upstream_id;type:integer;not null;default:0"`
-	ActualOutcome             string     `gorm:"column:actual_outcome;type:text;not null;default:''"`
-	CreatedAt                 time.Time  `gorm:"column:created_at;not null;index:idx_route_decisions_created"`
-	CompletedAt               *time.Time `gorm:"column:completed_at"`
+	ID                          int64      `gorm:"primaryKey;autoIncrement"`
+	RequestID                   string     `gorm:"column:request_id;type:text;not null;uniqueIndex"`
+	GroupID                     int64      `gorm:"column:group_id;type:integer;not null;default:0"`
+	Model                       string     `gorm:"type:text;not null;default:''"`
+	Protocol                    string     `gorm:"type:text;not null;default:''"`
+	Endpoint                    string     `gorm:"type:text;not null;default:''"`
+	SessionKey                  string     `gorm:"column:session_key;type:text;not null;default:'';index:idx_route_decisions_session_model,priority:1"`
+	PrefixHash                  string     `gorm:"column:prefix_hash;type:text;not null;default:'';index:idx_route_decisions_prefix_model,priority:1"`
+	CacheKey                    string     `gorm:"column:cache_key;type:text;not null;default:''"`
+	Strategy                    string     `gorm:"type:text;not null;default:'cost'"`
+	Reason                      string     `gorm:"type:text;not null;default:''"`
+	SelectedUpstreamID          int64      `gorm:"column:selected_upstream_id;type:integer;not null;default:0"`
+	CandidateCount              int        `gorm:"column:candidate_count;type:integer;not null;default:0"`
+	ForecastWindowSeconds       int64      `gorm:"column:forecast_window_seconds;type:integer;not null;default:0"`
+	ForecastRequests            float64    `gorm:"column:forecast_requests;type:real;not null;default:0"`
+	EstimatedInputTokens        int64      `gorm:"column:estimated_input_tokens;type:integer;not null;default:0"`
+	ReusablePrefixTokens        int64      `gorm:"column:reusable_prefix_tokens;type:integer;not null;default:0"`
+	EstimatedOutputTokens       int64      `gorm:"column:estimated_output_tokens;type:integer;not null;default:0"`
+	SelectedCost                *float64   `gorm:"column:selected_cost;type:real"`
+	NoCacheCost                 *float64   `gorm:"column:no_cache_cost;type:real"`
+	CacheCost                   *float64   `gorm:"column:cache_cost;type:real"`
+	EstimatedSavings            *float64   `gorm:"column:estimated_savings;type:real"`
+	Confidence                  float64    `gorm:"type:real;not null;default:0"`
+	CacheSelected               bool       `gorm:"column:cache_selected;not null;default:false"`
+	Exploration                 bool       `gorm:"not null;default:false"`
+	ActualCost                  *float64   `gorm:"column:actual_cost;type:real"`
+	ActualInputTokens           *int64     `gorm:"column:actual_input_tokens;type:integer"`
+	ActualInputTokensNormalized bool       `gorm:"column:actual_input_tokens_normalized;not null;default:false"`
+	ActualOutputTokens          *int64     `gorm:"column:actual_output_tokens;type:integer"`
+	ActualCachedTokens          *int64     `gorm:"column:actual_cached_tokens;type:integer"`
+	ActualCacheCreationTokens   *int64     `gorm:"column:actual_cache_creation_tokens;type:integer"`
+	ActualUpstreamID            int64      `gorm:"column:actual_upstream_id;type:integer;not null;default:0"`
+	ActualOutcome               string     `gorm:"column:actual_outcome;type:text;not null;default:''"`
+	CreatedAt                   time.Time  `gorm:"column:created_at;not null;index:idx_route_decisions_created"`
+	CompletedAt                 *time.Time `gorm:"column:completed_at"`
 }
 
 func (RouteDecisionModel) TableName() string { return "route_decisions" }
@@ -77,29 +78,30 @@ type RouteDecisionCandidateModel struct {
 func (RouteDecisionCandidateModel) TableName() string { return "route_decision_candidates" }
 
 type RoutingObservationModel struct {
-	ID                  int64      `gorm:"primaryKey;autoIncrement"`
-	RequestID           string     `gorm:"column:request_id;type:text;not null;uniqueIndex:idx_routing_obs_req_attempt,priority:1"`
-	AttemptNo           int        `gorm:"column:attempt_no;type:integer;not null;default:1;uniqueIndex:idx_routing_obs_req_attempt,priority:2"`
-	GroupID             int64      `gorm:"column:group_id;type:integer;not null;default:0"`
-	UpstreamID          int64      `gorm:"column:upstream_id;type:integer;not null;default:0;index:idx_routing_observations_upstream_model,priority:1"`
-	APIKeyHash          string     `gorm:"column:api_key_hash;type:text;not null;default:''"`
-	Model               string     `gorm:"type:text;not null;default:'';index:idx_routing_observations_upstream_model,priority:2"`
-	SessionKey          string     `gorm:"column:session_key;type:text;not null;default:'';index:idx_routing_observations_session_model,priority:1"`
-	PrefixHash          string     `gorm:"column:prefix_hash;type:text;not null;default:'';index:idx_routing_observations_prefix_model,priority:1"`
-	CacheKey            string     `gorm:"column:cache_key;type:text;not null;default:''"`
-	PrefixTokens        int64      `gorm:"column:prefix_tokens;type:integer;not null;default:0"`
-	InputTokens         int64      `gorm:"column:input_tokens;type:integer;not null;default:0"`
-	OutputTokens        int64      `gorm:"column:output_tokens;type:integer;not null;default:0"`
-	CachedTokens        int64      `gorm:"column:cached_tokens;type:integer;not null;default:0"`
-	CacheCreationTokens int64      `gorm:"column:cache_creation_tokens;type:integer;not null;default:0"`
-	TTFTMs              int64      `gorm:"column:ttft_ms;type:integer;not null;default:0"`
-	DurationMs          int64      `gorm:"column:duration_ms;type:integer;not null;default:0"`
-	Success             bool       `gorm:"not null;default:false"`
-	CacheEligible       bool       `gorm:"column:cache_eligible;not null;default:false"`
-	CacheHit            bool       `gorm:"column:cache_hit;not null;default:false"`
-	CacheCreated        bool       `gorm:"column:cache_created;not null;default:false"`
-	CacheExpiresAt      *time.Time `gorm:"column:cache_expires_at"`
-	ObservedAt          time.Time  `gorm:"column:observed_at;not null;index:idx_routing_observations_time"`
+	ID                    int64      `gorm:"primaryKey;autoIncrement"`
+	RequestID             string     `gorm:"column:request_id;type:text;not null;uniqueIndex:idx_routing_obs_req_attempt,priority:1"`
+	AttemptNo             int        `gorm:"column:attempt_no;type:integer;not null;default:1;uniqueIndex:idx_routing_obs_req_attempt,priority:2"`
+	GroupID               int64      `gorm:"column:group_id;type:integer;not null;default:0"`
+	UpstreamID            int64      `gorm:"column:upstream_id;type:integer;not null;default:0;index:idx_routing_observations_upstream_model,priority:1"`
+	APIKeyHash            string     `gorm:"column:api_key_hash;type:text;not null;default:''"`
+	Model                 string     `gorm:"type:text;not null;default:'';index:idx_routing_observations_upstream_model,priority:2"`
+	SessionKey            string     `gorm:"column:session_key;type:text;not null;default:'';index:idx_routing_observations_session_model,priority:1"`
+	PrefixHash            string     `gorm:"column:prefix_hash;type:text;not null;default:'';index:idx_routing_observations_prefix_model,priority:1"`
+	CacheKey              string     `gorm:"column:cache_key;type:text;not null;default:''"`
+	PrefixTokens          int64      `gorm:"column:prefix_tokens;type:integer;not null;default:0"`
+	InputTokens           int64      `gorm:"column:input_tokens;type:integer;not null;default:0"`
+	InputTokensNormalized bool       `gorm:"column:input_tokens_normalized;not null;default:false"`
+	OutputTokens          int64      `gorm:"column:output_tokens;type:integer;not null;default:0"`
+	CachedTokens          int64      `gorm:"column:cached_tokens;type:integer;not null;default:0"`
+	CacheCreationTokens   int64      `gorm:"column:cache_creation_tokens;type:integer;not null;default:0"`
+	TTFTMs                int64      `gorm:"column:ttft_ms;type:integer;not null;default:0"`
+	DurationMs            int64      `gorm:"column:duration_ms;type:integer;not null;default:0"`
+	Success               bool       `gorm:"not null;default:false"`
+	CacheEligible         bool       `gorm:"column:cache_eligible;not null;default:false"`
+	CacheHit              bool       `gorm:"column:cache_hit;not null;default:false"`
+	CacheCreated          bool       `gorm:"column:cache_created;not null;default:false"`
+	CacheExpiresAt        *time.Time `gorm:"column:cache_expires_at"`
+	ObservedAt            time.Time  `gorm:"column:observed_at;not null;index:idx_routing_observations_time"`
 }
 
 func (RoutingObservationModel) TableName() string { return "routing_observations" }

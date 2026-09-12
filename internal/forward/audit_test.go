@@ -23,8 +23,17 @@ func TestResponseAuditParsesSplitResponsesEvent(t *testing.T) {
 	if !audit.streamCompleted || audit.lastEvent != "response.completed" {
 		t.Fatalf("completion audit mismatch: completed=%v event=%q", audit.streamCompleted, audit.lastEvent)
 	}
-	if audit.usage.input != 12 || audit.usage.output != 7 || audit.usage.cached != 3 || audit.usage.cacheCreation != 5 {
+	// Responses input_tokens is inclusive of cached_tokens; the audit stores
+	// only the uncached portion so cost calculation cannot charge cache twice.
+	if audit.usage.input != 9 || audit.usage.output != 7 || audit.usage.cached != 3 || audit.usage.cacheCreation != 5 {
 		t.Fatalf("usage audit mismatch: %+v", audit.usage)
+	}
+}
+
+func TestUsageAuditNormalizesCodexInputTokens(t *testing.T) {
+	usage := usageFromJSON([]byte(`{"response":{"usage":{"input_tokens":120,"input_tokens_details":{"cached_tokens":80},"output_tokens":4}}}`), "codex")
+	if usage.input != 40 || usage.cached != 80 || usage.output != 4 {
+		t.Fatalf("codex usage mismatch: %+v", usage)
 	}
 }
 

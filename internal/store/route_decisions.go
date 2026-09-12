@@ -72,11 +72,12 @@ type RouteCandidateRecord struct {
 }
 
 type RouteDecisionOutcome struct {
-	ActualCost                *float64
-	ActualInputTokens         *int64
-	ActualOutputTokens        *int64
-	ActualCachedTokens        *int64
-	ActualCacheCreationTokens *int64
+	ActualCost                  *float64
+	ActualInputTokens           *int64
+	ActualInputTokensNormalized *bool
+	ActualOutputTokens          *int64
+	ActualCachedTokens          *int64
+	ActualCacheCreationTokens   *int64
 	// ActualUpstreamID is the upstream whose usage is being recorded. It may
 	// differ from RouteDecisionRecord.SelectedUpstreamID when the initial pick
 	// failed and a failover attempt succeeded. Zero means unknown / unchanged.
@@ -86,41 +87,43 @@ type RouteDecisionOutcome struct {
 }
 
 type RouteDecisionEntry struct {
-	ID                        int64                 `json:"id"`
-	RequestID                 string                `json:"request_id"`
-	GroupID                   int64                 `json:"group_id"`
-	Model                     string                `json:"model"`
-	Protocol                  string                `json:"protocol"`
-	Endpoint                  string                `json:"endpoint"`
-	SessionKey                string                `json:"session_key,omitempty"`
-	PrefixHash                string                `json:"prefix_hash,omitempty"`
-	CacheKey                  string                `json:"cache_key,omitempty"`
-	Strategy                  string                `json:"strategy"`
-	Reason                    string                `json:"reason"`
-	SelectedUpstreamID        int64                 `json:"selected_upstream_id"`
-	SelectedUpstreamName      string                `json:"selected_upstream"`
-	CandidateCount            int                   `json:"candidate_count"`
-	ForecastWindowSeconds     int64                 `json:"forecast_window_seconds"`
-	ForecastRequests          float64               `json:"forecast_requests"`
-	EstimatedInputTokens      int64                 `json:"estimated_input_tokens"`
-	ReusablePrefixTokens      int64                 `json:"reusable_prefix_tokens"`
-	EstimatedOutputTokens     int64                 `json:"estimated_output_tokens"`
-	SelectedCost              *float64              `json:"selected_cost,omitempty"`
-	NoCacheCost               *float64              `json:"no_cache_cost,omitempty"`
-	CacheCost                 *float64              `json:"cache_cost,omitempty"`
-	EstimatedSavings          *float64              `json:"estimated_savings,omitempty"`
-	Confidence                float64               `json:"confidence"`
-	CacheSelected             bool                  `json:"cache_selected"`
-	Exploration               bool                  `json:"exploration"`
-	ActualCost                *float64              `json:"actual_cost,omitempty"`
-	ActualInputTokens         *int64                `json:"actual_input_tokens,omitempty"`
-	ActualOutputTokens        *int64                `json:"actual_output_tokens,omitempty"`
-	ActualCachedTokens        *int64                `json:"actual_cached_tokens,omitempty"`
-	ActualCacheCreationTokens *int64                `json:"actual_cache_creation_tokens,omitempty"`
-	ActualOutcome             string                `json:"actual_outcome,omitempty"`
-	CreatedAt                 int64                 `json:"created_at"`
-	CompletedAt               int64                 `json:"completed_at,omitempty"`
-	Candidates                []RouteCandidateEntry `json:"candidates,omitempty"`
+	ID                          int64                 `json:"id"`
+	RequestID                   string                `json:"request_id"`
+	GroupID                     int64                 `json:"group_id"`
+	Model                       string                `json:"model"`
+	Protocol                    string                `json:"protocol"`
+	Endpoint                    string                `json:"endpoint"`
+	SessionKey                  string                `json:"session_key,omitempty"`
+	PrefixHash                  string                `json:"prefix_hash,omitempty"`
+	CacheKey                    string                `json:"cache_key,omitempty"`
+	Strategy                    string                `json:"strategy"`
+	Reason                      string                `json:"reason"`
+	SelectedUpstreamID          int64                 `json:"selected_upstream_id"`
+	SelectedUpstreamName        string                `json:"selected_upstream"`
+	CandidateCount              int                   `json:"candidate_count"`
+	ForecastWindowSeconds       int64                 `json:"forecast_window_seconds"`
+	ForecastRequests            float64               `json:"forecast_requests"`
+	EstimatedInputTokens        int64                 `json:"estimated_input_tokens"`
+	ReusablePrefixTokens        int64                 `json:"reusable_prefix_tokens"`
+	EstimatedOutputTokens       int64                 `json:"estimated_output_tokens"`
+	SelectedCost                *float64              `json:"selected_cost,omitempty"`
+	NoCacheCost                 *float64              `json:"no_cache_cost,omitempty"`
+	CacheCost                   *float64              `json:"cache_cost,omitempty"`
+	EstimatedSavings            *float64              `json:"estimated_savings,omitempty"`
+	Confidence                  float64               `json:"confidence"`
+	CacheSelected               bool                  `json:"cache_selected"`
+	Exploration                 bool                  `json:"exploration"`
+	ActualCost                  *float64              `json:"actual_cost,omitempty"`
+	ActualInputTokens           *int64                `json:"actual_input_tokens,omitempty"`
+	ActualInputTokensNormalized bool                  `json:"-"`
+	ActualPromptTokens          *int64                `json:"actual_prompt_tokens,omitempty"`
+	ActualOutputTokens          *int64                `json:"actual_output_tokens,omitempty"`
+	ActualCachedTokens          *int64                `json:"actual_cached_tokens,omitempty"`
+	ActualCacheCreationTokens   *int64                `json:"actual_cache_creation_tokens,omitempty"`
+	ActualOutcome               string                `json:"actual_outcome,omitempty"`
+	CreatedAt                   int64                 `json:"created_at"`
+	CompletedAt                 int64                 `json:"completed_at,omitempty"`
+	Candidates                  []RouteCandidateEntry `json:"candidates,omitempty"`
 }
 
 type RouteCandidateEntry struct {
@@ -295,12 +298,13 @@ func (s *Store) CompleteRouteDecision(requestID string, outcome RouteDecisionOut
 	}
 	result, err := s.exec(`UPDATE route_decisions SET
 		actual_cost=COALESCE(?,actual_cost),actual_input_tokens=COALESCE(?,actual_input_tokens),
+		actual_input_tokens_normalized=COALESCE(?,actual_input_tokens_normalized),
 		actual_output_tokens=COALESCE(?,actual_output_tokens),actual_cached_tokens=COALESCE(?,actual_cached_tokens),
 		actual_cache_creation_tokens=COALESCE(?,actual_cache_creation_tokens),
 		actual_upstream_id=COALESCE(?,actual_upstream_id),
 		actual_outcome=CASE WHEN ?='' THEN actual_outcome ELSE ? END,completed_at=?
-		WHERE request_id=?`, outcome.ActualCost, outcome.ActualInputTokens, outcome.ActualOutputTokens,
-		outcome.ActualCachedTokens, outcome.ActualCacheCreationTokens, actualUpstream,
+		WHERE request_id=?`, outcome.ActualCost, outcome.ActualInputTokens, outcome.ActualInputTokensNormalized,
+		outcome.ActualOutputTokens, outcome.ActualCachedTokens, outcome.ActualCacheCreationTokens, actualUpstream,
 		outcome.Outcome, outcome.Outcome,
 		s.timeValue(outcome.CompletedAt), requestID)
 	if err != nil {
@@ -317,9 +321,14 @@ func (s *Store) routeDecisionSelect(where string) string {
 		rd.reason,rd.selected_upstream_id,COALESCE(u.name,''),rd.candidate_count,rd.forecast_window_seconds,rd.forecast_requests,
 		rd.estimated_input_tokens,rd.reusable_prefix_tokens,rd.estimated_output_tokens,rd.selected_cost,rd.no_cache_cost,
 		rd.cache_cost,rd.estimated_savings,rd.confidence,rd.cache_selected,rd.exploration,rd.actual_cost,rd.actual_input_tokens,
+		rd.actual_input_tokens_normalized,CASE WHEN rd.actual_input_tokens IS NULL THEN NULL
+		WHEN rd.actual_input_tokens_normalized THEN rd.actual_input_tokens+COALESCE(rd.actual_cached_tokens,0)+COALESCE(rd.actual_cache_creation_tokens,0)
+		WHEN LOWER(COALESCE(NULLIF(au.protocol,''),NULLIF(u.protocol,''),rd.protocol,'')) IN ('claude','anthropic','messages','anthropic-messages') THEN rd.actual_input_tokens+COALESCE(rd.actual_cached_tokens,0)+COALESCE(rd.actual_cache_creation_tokens,0)
+		ELSE rd.actual_input_tokens END,
 		rd.actual_output_tokens,rd.actual_cached_tokens,rd.actual_cache_creation_tokens,rd.actual_outcome,` +
 		s.unixExpr("rd.created_at") + `,COALESCE(` + s.unixExpr("rd.completed_at") + `,0)
-		FROM route_decisions rd LEFT JOIN upstreams u ON u.id=rd.selected_upstream_id` + where
+		FROM route_decisions rd LEFT JOIN upstreams u ON u.id=rd.selected_upstream_id
+		LEFT JOIN upstreams au ON au.id=rd.actual_upstream_id` + where
 }
 
 func scanRouteDecision(scanner rowScanner) (*RouteDecisionEntry, error) {
@@ -330,7 +339,7 @@ func scanRouteDecision(scanner rowScanner) (*RouteDecisionEntry, error) {
 		&entry.ForecastRequests, &entry.EstimatedInputTokens, &entry.ReusablePrefixTokens,
 		&entry.EstimatedOutputTokens, &entry.SelectedCost, &entry.NoCacheCost, &entry.CacheCost,
 		&entry.EstimatedSavings, &entry.Confidence, &entry.CacheSelected, &entry.Exploration,
-		&entry.ActualCost, &entry.ActualInputTokens, &entry.ActualOutputTokens, &entry.ActualCachedTokens,
+		&entry.ActualCost, &entry.ActualInputTokens, &entry.ActualInputTokensNormalized, &entry.ActualPromptTokens, &entry.ActualOutputTokens, &entry.ActualCachedTokens,
 		&entry.ActualCacheCreationTokens, &entry.ActualOutcome, &entry.CreatedAt, &entry.CompletedAt)
 	return entry, err
 }

@@ -18,14 +18,14 @@ import (
 // caches reduce database work on the request hot path; PostgreSQL remains the
 // source of truth and the existing health manager supplies fast breaker state.
 type intelligentRouter struct {
-	store     *store.Store
-	config    func() routing.Config
-	mu        sync.Mutex
-	billing   billingCacheEntry
-	prices    map[string]priceCacheEntry
-	stats     map[statsCacheKey]statsCacheEntry
-	prefix    map[prefixCacheKey]prefixCacheEntry
-	inflation map[int64]inflationCacheEntry
+	store   *store.Store
+	config  func() routing.Config
+	mu      sync.Mutex
+	billing billingCacheEntry
+	prices  map[string]priceCacheEntry
+	stats   map[statsCacheKey]statsCacheEntry
+	prefix  map[prefixCacheKey]prefixCacheEntry
+	tokens  map[prefixCacheKey]tokenCacheEntry
 }
 
 const (
@@ -71,9 +71,10 @@ type prefixCacheEntry struct {
 	err     error
 }
 
-type inflationCacheEntry struct {
+type tokenCacheEntry struct {
 	expires time.Time
-	value   float64
+	value   store.CacheTokenAverages
+	err     error
 }
 
 func (r *intelligentRouter) pick(s *Scheduler, groupID int64, model string, features routing.RequestFeatures, exclude map[int64]bool) (*upstream.Upstream, health.Lease, routing.Decision, error) {
@@ -257,7 +258,12 @@ func (r *intelligentRouter) cache(item *upstream.Upstream, model string, feature
 
 	sc := routing.ResolveSessionCache(params, now)
 	profile := sc.ToCacheProfile()
-	profile.InputInflation = r.tokenInflation(item.ID, now)
+	usage := r.cacheTokens(keyHash, item.ID, model, prefixHash, now)
+	profile.ObservedRequests = usage.Requests
+	profile.ObservedInputTokens = usage.InputTokens
+	profile.ObservedCacheReadTokens = usage.CacheReadTokens
+	profile.ObservedCacheWriteTokens = usage.CacheWriteTokens
+	profile.ObservedCacheCreateRate = usage.CreateRate
 	return profile
 }
 
@@ -318,26 +324,24 @@ func (r *intelligentRouter) cacheCoverage(upstreamID int64) float64 {
 	return ratio
 }
 
-func (r *intelligentRouter) tokenInflation(upstreamID int64, now time.Time) float64 {
+func (r *intelligentRouter) cacheTokens(apiKeyHash string, upstreamID int64, model, prefixHash string, now time.Time) store.CacheTokenAverages {
+	key := prefixCacheKey{apiKeyHash: apiKeyHash, upstreamID: upstreamID, model: model, prefixHash: prefixHash}
 	r.mu.Lock()
-	if r.inflation != nil {
-		if entry, ok := r.inflation[upstreamID]; ok && now.Before(entry.expires) {
+	if r.tokens != nil {
+		if entry, ok := r.tokens[key]; ok && now.Before(entry.expires) {
 			r.mu.Unlock()
 			return entry.value
 		}
 	}
 	r.mu.Unlock()
-	factor, _ := r.store.TokenInflationFactor(upstreamID)
-	if factor < 1 {
-		factor = 1
-	}
+	value, err := r.store.CacheTokenAverages(apiKeyHash, upstreamID, model, prefixHash)
 	r.mu.Lock()
-	if r.inflation == nil {
-		r.inflation = make(map[int64]inflationCacheEntry)
+	if r.tokens == nil {
+		r.tokens = make(map[prefixCacheKey]tokenCacheEntry)
 	}
-	r.inflation[upstreamID] = inflationCacheEntry{expires: now.Add(billingCacheTTL), value: factor}
+	r.tokens[key] = tokenCacheEntry{expires: now.Add(billingCacheTTL), value: value, err: err}
 	r.mu.Unlock()
-	return factor
+	return value
 }
 
 func (r *intelligentRouter) modelPricing(model string, now time.Time) (store.ModelPricing, error) {

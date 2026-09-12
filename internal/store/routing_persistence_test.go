@@ -75,8 +75,64 @@ func TestRouteDecisionPersistenceIsIdempotent(t *testing.T) {
 	if entry.ActualCost == nil || *entry.ActualCost != actualCost || entry.ActualOutcome != "success" {
 		t.Fatalf("actual outcome not persisted: %+v", entry)
 	}
+	if err := st.SaveRoutingObservation(RoutingObservationRecord{
+		RequestID: "route-1", AttemptNo: 1, UpstreamID: 11, Model: "claude-sonnet",
+		InputTokens: 1200, CachedTokens: 200, CacheCreationTokens: 100,
+		Success: true, ObservedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	inflation, err := st.ListUpstreamTokenInflationStats(time.Hour, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := inflation[11]; got.TokenInflation != 1.5 || got.TokenInflationSamples != 1 {
+		t.Fatalf("unexpected upstream token inflation: %+v", got)
+	}
 	if err := st.CompleteRouteDecision("missing", RouteDecisionOutcome{}); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("missing decision should return sql.ErrNoRows, got %v", err)
+	}
+}
+
+func TestRouteDecisionPromptTokensDistinguishLegacyAndCanonicalUsage(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "prompt-tokens.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Now().Truncate(time.Second)
+	for _, id := range []string{"legacy-prompt", "canonical-prompt"} {
+		if _, err := st.SaveRouteDecision(RouteDecisionRecord{
+			RequestID: id, GroupID: 1, Model: "gpt-5", Protocol: "codex", SelectedUpstreamID: 1,
+			EstimatedInputTokens: 100, CreatedAt: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	input, cached := int64(100), int64(50)
+	if err := st.CompleteRouteDecision("legacy-prompt", RouteDecisionOutcome{
+		ActualInputTokens: &input, ActualCachedTokens: &cached, Outcome: "success", CompletedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	normalized := true
+	if err := st.CompleteRouteDecision("canonical-prompt", RouteDecisionOutcome{
+		ActualInputTokens: &input, ActualInputTokensNormalized: &normalized, ActualCachedTokens: &cached,
+		Outcome: "success", CompletedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := st.GetRouteDecisionByRequestID("legacy-prompt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := st.GetRouteDecisionByRequestID("canonical-prompt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.ActualPromptTokens == nil || *legacy.ActualPromptTokens != 100 ||
+		canonical.ActualPromptTokens == nil || *canonical.ActualPromptTokens != 150 {
+		t.Fatalf("unexpected prompt token compatibility: legacy=%v canonical=%v", legacy.ActualPromptTokens, canonical.ActualPromptTokens)
 	}
 }
 
@@ -131,6 +187,11 @@ func TestRoutingObservationStatsAndCacheIsolation(t *testing.T) {
 		// key-b has its own entry; reading it must not return key-a's cache.
 		t.Fatal(err)
 	}
+	averages, err := st.CacheTokenAverages("key-a", 7, "m", "p")
+	if err != nil || averages.Requests != 2 || averages.InputTokens != 120 ||
+		averages.CacheReadTokens != 50 || averages.CacheWriteTokens != 50 || averages.CreateRate != 0.5 {
+		t.Fatalf("unexpected cache token averages: %+v, err=%v", averages, err)
+	}
 	entries, err := st.ListRoutingObservations(RoutingObservationFilter{APIKeyHash: "key-a", Model: "m", Limit: 10})
 	if err != nil || len(entries) != 2 {
 		t.Fatalf("unexpected filtered observations: %d, %v", len(entries), err)
@@ -141,7 +202,6 @@ func TestRoutingObservationStatsAndCacheIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 }
-
 
 // AssumedCacheTTL must mirror routing.selectAdaptiveTTL exactly, otherwise the
 // store fallback would stamp an ExpiresAt derived from a wrong TTL and the

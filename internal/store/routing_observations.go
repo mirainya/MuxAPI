@@ -14,55 +14,57 @@ const DefaultRoutingStatsWindow = 15 * time.Minute
 // upstream attempt. APIKeyHash must identify the upstream credential without
 // storing it; callers should use a stable cryptographic hash.
 type RoutingObservationRecord struct {
-	RequestID           string
-	AttemptNo           int
-	GroupID             int64
-	UpstreamID          int64
-	APIKeyHash          string
-	Model               string
-	SessionKey          string
-	PrefixHash          string
-	CacheKey            string
-	PrefixTokens        int64
-	InputTokens         int64
-	OutputTokens        int64
-	CachedTokens        int64
-	CacheCreationTokens int64
-	TTFTMs              int64
-	DurationMs          int64
-	Success             bool
-	CacheEligible       bool
-	CacheHit            bool
-	CacheCreated        bool
-	CacheTTL            time.Duration
-	CacheExpiresAt      time.Time
-	ObservedAt          time.Time
+	RequestID             string
+	AttemptNo             int
+	GroupID               int64
+	UpstreamID            int64
+	APIKeyHash            string
+	Model                 string
+	SessionKey            string
+	PrefixHash            string
+	CacheKey              string
+	PrefixTokens          int64
+	InputTokens           int64
+	InputTokensNormalized bool
+	OutputTokens          int64
+	CachedTokens          int64
+	CacheCreationTokens   int64
+	TTFTMs                int64
+	DurationMs            int64
+	Success               bool
+	CacheEligible         bool
+	CacheHit              bool
+	CacheCreated          bool
+	CacheTTL              time.Duration
+	CacheExpiresAt        time.Time
+	ObservedAt            time.Time
 }
 
 type RoutingObservationEntry struct {
-	ID                  int64  `json:"id"`
-	RequestID           string `json:"request_id"`
-	AttemptNo           int    `json:"attempt_no"`
-	GroupID             int64  `json:"group_id"`
-	UpstreamID          int64  `json:"upstream_id"`
-	APIKeyHash          string `json:"api_key_hash,omitempty"`
-	Model               string `json:"model"`
-	SessionKey          string `json:"session_key,omitempty"`
-	PrefixHash          string `json:"prefix_hash,omitempty"`
-	CacheKey            string `json:"cache_key,omitempty"`
-	PrefixTokens        int64  `json:"prefix_tokens"`
-	InputTokens         int64  `json:"input_tokens"`
-	OutputTokens        int64  `json:"output_tokens"`
-	CachedTokens        int64  `json:"cached_tokens"`
-	CacheCreationTokens int64  `json:"cache_creation_tokens"`
-	TTFTMs              int64  `json:"ttft_ms"`
-	DurationMs          int64  `json:"duration_ms"`
-	Success             bool   `json:"success"`
-	CacheEligible       bool   `json:"cache_eligible"`
-	CacheHit            bool   `json:"cache_hit"`
-	CacheCreated        bool   `json:"cache_created"`
-	CacheExpiresAt      int64  `json:"cache_expires_at,omitempty"`
-	ObservedAt          int64  `json:"observed_at"`
+	ID                    int64  `json:"id"`
+	RequestID             string `json:"request_id"`
+	AttemptNo             int    `json:"attempt_no"`
+	GroupID               int64  `json:"group_id"`
+	UpstreamID            int64  `json:"upstream_id"`
+	APIKeyHash            string `json:"api_key_hash,omitempty"`
+	Model                 string `json:"model"`
+	SessionKey            string `json:"session_key,omitempty"`
+	PrefixHash            string `json:"prefix_hash,omitempty"`
+	CacheKey              string `json:"cache_key,omitempty"`
+	PrefixTokens          int64  `json:"prefix_tokens"`
+	InputTokens           int64  `json:"input_tokens"`
+	InputTokensNormalized bool   `json:"-"`
+	OutputTokens          int64  `json:"output_tokens"`
+	CachedTokens          int64  `json:"cached_tokens"`
+	CacheCreationTokens   int64  `json:"cache_creation_tokens"`
+	TTFTMs                int64  `json:"ttft_ms"`
+	DurationMs            int64  `json:"duration_ms"`
+	Success               bool   `json:"success"`
+	CacheEligible         bool   `json:"cache_eligible"`
+	CacheHit              bool   `json:"cache_hit"`
+	CacheCreated          bool   `json:"cache_created"`
+	CacheExpiresAt        int64  `json:"cache_expires_at,omitempty"`
+	ObservedAt            int64  `json:"observed_at"`
 }
 
 type RoutingObservationFilter struct {
@@ -104,29 +106,104 @@ type UpstreamRoutingStats struct {
 // proxied upstreams that only cache a portion of the prefix.
 func (s *Store) CacheCoverageRatio(upstreamID int64) (float64, error) {
 	var ratio float64
-	err := s.queryRow(`SELECT AVG(CAST(cached_tokens AS REAL) / NULLIF(cached_tokens + input_tokens + cache_creation_tokens, 0))
-		FROM (SELECT cached_tokens, input_tokens, cache_creation_tokens
-			FROM request_attempts WHERE upstream_id=? AND status=200 AND cached_tokens > 0
-			ORDER BY id DESC LIMIT 50) sub`, upstreamID).Scan(&ratio)
+	err := s.queryRow(`SELECT AVG(CAST(cached_tokens AS REAL) / NULLIF(total_tokens, 0))
+		FROM (SELECT a.cached_tokens,
+			CASE WHEN a.input_tokens_normalized OR LOWER(COALESCE(a.protocol,u.protocol,'')) IN ('claude','anthropic','messages','anthropic-messages')
+				THEN a.cached_tokens+a.input_tokens+a.cache_creation_tokens
+				WHEN LOWER(COALESCE(a.protocol,u.protocol,'')) IN ('openai','chat','chat_completions','chat-completions','openai-response','openai_responses','responses','codex','gemini','google','generativelanguage','generatecontent')
+				THEN a.input_tokens+a.cache_creation_tokens ELSE a.input_tokens+a.cached_tokens+a.cache_creation_tokens END AS total_tokens
+			FROM request_attempts a LEFT JOIN upstreams u ON u.id=a.upstream_id
+			WHERE a.upstream_id=? AND a.status=200 AND a.cached_tokens > 0
+			ORDER BY a.id DESC LIMIT 50) sub`, upstreamID).Scan(&ratio)
 	if err != nil {
 		return 0, err
 	}
 	return ratio, nil
 }
 
-// TokenInflationFactor returns the average ratio of actual billed tokens to the
-// routing estimate (prefix_tokens) for an upstream. Upstreams that inject extra
-// system prompts will have inflation > 1.0, meaning the cost model should use a
-// larger InputTokens when estimating the no-cache baseline and suffix cost.
-// Only considers recent cache-eligible observations where prefix_tokens is
-// meaningful (> 1024).
+// CacheTokenAverages contains provider-reported token counts for recent
+// cache-eligible requests. Read and creation tokens are intentionally kept
+// separate because both can be present in one request.
+type CacheTokenAverages struct {
+	Requests         int64
+	InputTokens      float64
+	CacheReadTokens  float64
+	CacheWriteTokens float64
+	CreateRate       float64
+}
+
+// CacheTokenAverages returns recent usage for one upstream/model/prefix. An
+// exact prefix match is preferred; when a conversation derives a new prefix
+// hash on every turn, it falls back to the same upstream and model.
+func (s *Store) CacheTokenAverages(apiKeyHash string, upstreamID int64, model, prefixHash string) (CacheTokenAverages, error) {
+	query := `SELECT COUNT(*),
+		COALESCE(AVG(CAST(input_tokens AS REAL)),0),
+		COALESCE(AVG(CAST(cached_tokens AS REAL)),0),
+		COALESCE(AVG(CAST(cache_creation_tokens AS REAL)),0),
+		COALESCE(AVG(CASE WHEN cache_creation_tokens>0 THEN 1.0 ELSE 0.0 END),0)
+		FROM (SELECT CASE WHEN ro.input_tokens_normalized OR LOWER(COALESCE(a.protocol,u.protocol,'')) IN ('claude','anthropic','messages','anthropic-messages')
+			THEN ro.input_tokens
+			WHEN LOWER(COALESCE(a.protocol,u.protocol,'')) IN ('openai','chat','chat_completions','chat-completions','openai-response','openai_responses','responses','codex','gemini','google','generativelanguage','generatecontent')
+			THEN CASE WHEN ro.input_tokens>ro.cached_tokens THEN ro.input_tokens-ro.cached_tokens ELSE 0 END ELSE ro.input_tokens END AS input_tokens,
+			ro.cached_tokens,ro.cache_creation_tokens
+			FROM routing_observations ro LEFT JOIN request_attempts a ON a.request_id=ro.request_id AND a.attempt_no=ro.attempt_no
+			LEFT JOIN upstreams u ON u.id=ro.upstream_id
+			WHERE ro.api_key_hash=? AND ro.upstream_id=? AND ro.model=?
+				AND (ro.prefix_hash=? OR ro.session_key=?) AND ro.cache_eligible=TRUE
+				AND (ro.input_tokens>0 OR ro.cached_tokens>0 OR ro.cache_creation_tokens>0)
+			ORDER BY ro.observed_at DESC LIMIT 50) recent`
+	var out CacheTokenAverages
+	err := s.queryRow(query, apiKeyHash, upstreamID, model, prefixHash, prefixHash).Scan(
+		&out.Requests, &out.InputTokens, &out.CacheReadTokens, &out.CacheWriteTokens, &out.CreateRate)
+	if err != nil {
+		return out, err
+	}
+	if out.Requests > 0 {
+		return out, nil
+	}
+	return s.cacheTokenAveragesByModel(apiKeyHash, upstreamID, model)
+}
+
+func (s *Store) cacheTokenAveragesByModel(apiKeyHash string, upstreamID int64, model string) (CacheTokenAverages, error) {
+	query := `SELECT COUNT(*),
+		COALESCE(AVG(CAST(input_tokens AS REAL)),0),
+		COALESCE(AVG(CAST(cached_tokens AS REAL)),0),
+		COALESCE(AVG(CAST(cache_creation_tokens AS REAL)),0),
+		COALESCE(AVG(CASE WHEN cache_creation_tokens>0 THEN 1.0 ELSE 0.0 END),0)
+		FROM (SELECT CASE WHEN ro.input_tokens_normalized OR LOWER(COALESCE(a.protocol,u.protocol,'')) IN ('claude','anthropic','messages','anthropic-messages')
+			THEN ro.input_tokens
+			WHEN LOWER(COALESCE(a.protocol,u.protocol,'')) IN ('openai','chat','chat_completions','chat-completions','openai-response','openai_responses','responses','codex','gemini','google','generativelanguage','generatecontent')
+			THEN CASE WHEN ro.input_tokens>ro.cached_tokens THEN ro.input_tokens-ro.cached_tokens ELSE 0 END ELSE ro.input_tokens END AS input_tokens,
+			ro.cached_tokens,ro.cache_creation_tokens
+			FROM routing_observations ro LEFT JOIN request_attempts a ON a.request_id=ro.request_id AND a.attempt_no=ro.attempt_no
+			LEFT JOIN upstreams u ON u.id=ro.upstream_id
+			WHERE ro.api_key_hash=? AND ro.upstream_id=? AND ro.model=? AND ro.cache_eligible=TRUE
+				AND (ro.input_tokens>0 OR ro.cached_tokens>0 OR ro.cache_creation_tokens>0)
+			ORDER BY ro.observed_at DESC LIMIT 50) recent`
+	var out CacheTokenAverages
+	err := s.queryRow(query, apiKeyHash, upstreamID, model).Scan(
+		&out.Requests, &out.InputTokens, &out.CacheReadTokens, &out.CacheWriteTokens, &out.CreateRate)
+	return out, err
+}
+
+// TokenInflationFactor is retained for compatibility with callers that used
+// the old diagnostic. It is no longer used by routing because multiplying the
+// whole request by this ratio confuses provider-injected input with cache
+// creation and can overstate a forecast by several times.
 func (s *Store) TokenInflationFactor(upstreamID int64) (float64, error) {
 	var factor float64
-	err := s.queryRow(`SELECT AVG(CAST(input_tokens + cached_tokens + cache_creation_tokens AS REAL) / prefix_tokens)
-		FROM (SELECT input_tokens, cached_tokens, cache_creation_tokens, prefix_tokens
-			FROM routing_observations
-			WHERE upstream_id=? AND prefix_tokens > 1024 AND (cached_tokens > 0 OR cache_creation_tokens > 0)
-			ORDER BY observed_at DESC LIMIT 50) sub`, upstreamID).Scan(&factor)
+	err := s.queryRow(`SELECT AVG(CAST(context_tokens AS REAL) / prefix_tokens)
+		FROM (SELECT ro.prefix_tokens,
+			CASE WHEN ro.input_tokens_normalized OR LOWER(COALESCE(NULLIF(a.protocol,''),NULLIF(u.protocol,''),rd.protocol,'')) IN ('claude','anthropic','messages','anthropic-messages')
+				THEN ro.input_tokens+ro.cached_tokens+ro.cache_creation_tokens
+				WHEN LOWER(COALESCE(NULLIF(a.protocol,''),NULLIF(u.protocol,''),rd.protocol,'')) IN ('openai','chat','chat_completions','chat-completions','openai-response','openai_responses','responses','codex','gemini','google','generativelanguage','generatecontent')
+				THEN ro.input_tokens+ro.cache_creation_tokens ELSE ro.input_tokens+ro.cached_tokens+ro.cache_creation_tokens END AS context_tokens
+			FROM routing_observations ro
+			LEFT JOIN request_attempts a ON a.request_id=ro.request_id AND a.attempt_no=ro.attempt_no
+			LEFT JOIN upstreams u ON u.id=ro.upstream_id
+			LEFT JOIN route_decisions rd ON rd.request_id=ro.request_id
+			WHERE ro.upstream_id=? AND ro.prefix_tokens > 1024 AND (ro.cached_tokens > 0 OR ro.cache_creation_tokens > 0)
+			ORDER BY ro.observed_at DESC LIMIT 50) sub`, upstreamID).Scan(&factor)
 	if err != nil {
 		return 1, err
 	}
@@ -134,6 +211,76 @@ func (s *Store) TokenInflationFactor(upstreamID int64) (float64, error) {
 		return 1, nil
 	}
 	return factor, nil
+}
+
+// UpstreamTokenInflationStats is a recent, weighted comparison between the
+// provider-reported prompt context and the client-side routing estimate.
+// Samples without a routing estimate or provider usage are excluded.
+type UpstreamTokenInflationStats struct {
+	UpstreamID            int64
+	TokenInflation        float64
+	TokenInflationSamples int64
+}
+
+// ListUpstreamTokenInflationStats returns one aggregate per upstream. The
+// default window is 24 hours; the context ratio is calculated from token totals rather
+// than averaging per-request ratios so small requests cannot dominate the
+// result. Observations are joined by request ID, preserving failover attempts
+// as independent upstream samples.
+func (s *Store) ListUpstreamTokenInflationStats(window time.Duration, now time.Time) (map[int64]UpstreamTokenInflationStats, error) {
+	if window <= 0 {
+		window = 24 * time.Hour
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	from := now.Add(-window)
+	rows, err := s.query(`SELECT ro.upstream_id,COUNT(*),
+		COALESCE(SUM(CAST(CASE WHEN ro.input_tokens_normalized OR LOWER(COALESCE(NULLIF(a.protocol,''),NULLIF(u.protocol,''),rd.protocol,'')) IN ('claude','anthropic','messages','anthropic-messages')
+			THEN ro.input_tokens+ro.cached_tokens+ro.cache_creation_tokens
+			WHEN LOWER(COALESCE(NULLIF(a.protocol,''),NULLIF(u.protocol,''),rd.protocol,'')) IN ('openai','chat','chat_completions','chat-completions','openai-response','openai_responses','responses','codex','gemini','google','generativelanguage','generatecontent')
+			THEN ro.input_tokens+ro.cache_creation_tokens ELSE ro.input_tokens+ro.cached_tokens+ro.cache_creation_tokens END AS REAL)),0),
+		COALESCE(SUM(CAST(rd.estimated_input_tokens AS REAL)),0)
+		FROM routing_observations ro
+		JOIN route_decisions rd ON rd.request_id=ro.request_id
+		LEFT JOIN request_attempts a ON a.request_id=ro.request_id AND a.attempt_no=ro.attempt_no
+		LEFT JOIN upstreams u ON u.id=ro.upstream_id
+		WHERE ro.observed_at>=? AND ro.observed_at<?
+			AND rd.estimated_input_tokens>0
+			AND (ro.input_tokens>0 OR ro.cached_tokens>0 OR ro.cache_creation_tokens>0)
+		GROUP BY ro.upstream_id`, s.timeValue(from), s.timeValue(now))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type totals struct {
+		samples   int64
+		actual    float64
+		estimated float64
+	}
+	values := make(map[int64]totals)
+	for rows.Next() {
+		var id, samples int64
+		var actual, estimated float64
+		if err := rows.Scan(&id, &samples, &actual, &estimated); err != nil {
+			return nil, err
+		}
+		values[id] = totals{samples: samples, actual: actual, estimated: estimated}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make(map[int64]UpstreamTokenInflationStats, len(values))
+	for id, value := range values {
+		if value.estimated <= 0 || value.actual <= 0 {
+			continue
+		}
+		out[id] = UpstreamTokenInflationStats{
+			UpstreamID: id, TokenInflation: value.actual / value.estimated,
+			TokenInflationSamples: value.samples,
+		}
+	}
+	return out, nil
 }
 
 type PrefixCacheStats struct {
@@ -237,13 +384,13 @@ func (s *Store) SaveRoutingObservations(observations []RoutingObservationRecord)
 	for _, observation := range observations {
 		result, err := tx.Exec(`INSERT INTO routing_observations(
 			request_id,attempt_no,group_id,upstream_id,api_key_hash,model,session_key,prefix_hash,cache_key,
-			prefix_tokens,input_tokens,output_tokens,cached_tokens,cache_creation_tokens,ttft_ms,duration_ms,
+			prefix_tokens,input_tokens,input_tokens_normalized,output_tokens,cached_tokens,cache_creation_tokens,ttft_ms,duration_ms,
 			success,cache_eligible,cache_hit,cache_created,cache_expires_at,observed_at)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 			ON CONFLICT(request_id,attempt_no) DO NOTHING`,
 			observation.RequestID, observation.AttemptNo, observation.GroupID, observation.UpstreamID,
 			observation.APIKeyHash, observation.Model, observation.SessionKey, observation.PrefixHash,
-			observation.CacheKey, observation.PrefixTokens, observation.InputTokens, observation.OutputTokens,
+			observation.CacheKey, observation.PrefixTokens, observation.InputTokens, observation.InputTokensNormalized, observation.OutputTokens,
 			observation.CachedTokens, observation.CacheCreationTokens, observation.TTFTMs,
 			observation.DurationMs, observation.Success, observation.CacheEligible, observation.CacheHit,
 			observation.CacheCreated, nullableRoutingTime(s, observation.CacheExpiresAt),
@@ -311,7 +458,7 @@ func (s *Store) upsertPrefixCacheStats(tx *rawTx, observation RoutingObservation
 
 func (s *Store) routingObservationSelect(where string) string {
 	return `SELECT id,request_id,attempt_no,group_id,upstream_id,api_key_hash,model,session_key,prefix_hash,
-		cache_key,prefix_tokens,input_tokens,output_tokens,cached_tokens,cache_creation_tokens,ttft_ms,duration_ms,
+		cache_key,prefix_tokens,input_tokens,input_tokens_normalized,output_tokens,cached_tokens,cache_creation_tokens,ttft_ms,duration_ms,
 		success,cache_eligible,cache_hit,cache_created,COALESCE(` + s.unixExpr("cache_expires_at") + `,0),` +
 		s.unixExpr("observed_at") + ` FROM routing_observations` + where
 }
@@ -320,7 +467,7 @@ func scanRoutingObservation(scanner rowScanner) (RoutingObservationEntry, error)
 	var entry RoutingObservationEntry
 	err := scanner.Scan(&entry.ID, &entry.RequestID, &entry.AttemptNo, &entry.GroupID, &entry.UpstreamID,
 		&entry.APIKeyHash, &entry.Model, &entry.SessionKey, &entry.PrefixHash, &entry.CacheKey,
-		&entry.PrefixTokens, &entry.InputTokens, &entry.OutputTokens, &entry.CachedTokens,
+		&entry.PrefixTokens, &entry.InputTokens, &entry.InputTokensNormalized, &entry.OutputTokens, &entry.CachedTokens,
 		&entry.CacheCreationTokens, &entry.TTFTMs, &entry.DurationMs, &entry.Success,
 		&entry.CacheEligible, &entry.CacheHit, &entry.CacheCreated, &entry.CacheExpiresAt, &entry.ObservedAt)
 	return entry, err

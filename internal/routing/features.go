@@ -93,10 +93,6 @@ func ExtractRequestFeatures(body []byte, options FeatureOptions) (RequestFeature
 			features.CodeRatio += float64(estimateTokens(part.Text))
 		}
 	}
-	if features.InputTokens > 0 {
-		features.CodeRatio /= float64(features.InputTokens)
-	}
-	features.ComplexityScore = EstimateComplexity(features)
 	// The latest content part is normally the newly appended user turn and is
 	// not reusable. A client-supplied session/cache key identifies the scope;
 	// it does not make the current turn cacheable.
@@ -106,6 +102,16 @@ func ExtractRequestFeatures(body []byte, options FeatureOptions) (RequestFeature
 		}
 		features.ReusableInputTokens += estimateTokens(part.Text)
 	}
+	if protocol == "responses" {
+		if total, reusable, ok := codexInputTokenCounts(body, features.Model); ok {
+			features.InputTokens = total
+			features.ReusableInputTokens = reusable
+		}
+	}
+	if features.InputTokens > 0 {
+		features.CodeRatio /= float64(features.InputTokens)
+	}
+	features.ComplexityScore = EstimateComplexity(features)
 	if features.CacheKey == "" {
 		features.CacheKey = hashPrefix(parts, features.Model, protocol)
 	}
@@ -129,7 +135,171 @@ func extractResponses(object map[string]any) []textPart {
 	if object == nil {
 		return nil
 	}
-	return extractMessages(object["input"], "")
+	var out []textPart
+	// Responses serializes instructions and tool definitions before the input
+	// items. Keep that order so the final input item remains the non-reusable
+	// suffix used by the cache forecast.
+	out = append(out, extractResponseInstructions(object["instructions"])...)
+	out = append(out, extractResponseTools(object["tools"])...)
+	if text, ok := object["text"].(map[string]any); ok {
+		if format, ok := text["format"]; ok {
+			out = append(out, extractResponseSchema(format)...)
+		}
+	}
+	out = append(out, extractResponseInput(object["input"])...)
+	return out
+}
+
+func extractResponseInstructions(value any) []textPart {
+	if value == nil {
+		return nil
+	}
+	if text, ok := value.(string); ok {
+		if strings.TrimSpace(text) == "" {
+			return nil
+		}
+		return []textPart{classifyText(text, "instructions")}
+	}
+	return extractResponseInput(value)
+}
+
+func extractResponseInput(value any) []textPart {
+	var out []textPart
+	switch item := value.(type) {
+	case string:
+		if strings.TrimSpace(item) != "" {
+			out = append(out, classifyText(item, "user"))
+		}
+	case []any:
+		for _, raw := range item {
+			if text, ok := raw.(string); ok {
+				if strings.TrimSpace(text) != "" {
+					out = append(out, classifyText(text, "user"))
+				}
+				continue
+			}
+			out = append(out, extractResponseItem(raw)...)
+		}
+	case map[string]any:
+		out = append(out, extractResponseItem(item)...)
+	}
+	return out
+}
+
+func extractResponseItem(value any) []textPart {
+	object, ok := value.(map[string]any)
+	if !ok {
+		return nil
+	}
+	typ := strings.ToLower(strings.TrimSpace(firstString(object, "type")))
+	role := firstString(object, "role")
+	if role == "" {
+		role = typ
+	}
+	if role == "" {
+		role = "user"
+	}
+	switch typ {
+	case "message":
+		if content, ok := object["content"]; ok {
+			return extractMessagesWithRole(content, role)
+		}
+		return extractResponseTextFields(object, role, false)
+	case "function_call":
+		return extractResponseTextFields(object, role, true, "name", "arguments")
+	case "function_call_output":
+		return extractResponseTextFields(object, role, true, "output")
+	case "custom_tool_call":
+		return extractResponseTextFields(object, role, true, "name", "input")
+	case "custom_tool_call_output":
+		return extractResponseTextFields(object, role, true, "output")
+	case "reasoning":
+		// encrypted_content is an opaque provider token, not user text. Counting
+		// its Base64 representation would turn a transport envelope into a
+		// several-times larger client estimate.
+		return extractResponseTextFields(object, role, false, "summary", "content")
+	case "additional_tools":
+		return extractResponseTools(object["tools"])
+	default:
+		return extractResponseTextFields(object, role, strings.Contains(typ, "tool"),
+			"text", "input_text", "output_text", "content", "output", "input", "arguments", "name")
+	}
+}
+
+func extractResponseTextFields(object map[string]any, role string, tool bool, keys ...string) []textPart {
+	var out []textPart
+	for _, key := range keys {
+		value, ok := object[key]
+		if !ok {
+			continue
+		}
+		out = append(out, extractResponseValue(value, role, tool)...)
+	}
+	return out
+}
+
+func extractResponseValue(value any, role string, tool bool) []textPart {
+	var out []textPart
+	switch item := value.(type) {
+	case string:
+		if strings.TrimSpace(item) != "" {
+			part := classifyText(item, role)
+			part.Tool = part.Tool || tool
+			out = append(out, part)
+		}
+	case []any:
+		for _, raw := range item {
+			out = append(out, extractResponseValue(raw, role, tool)...)
+		}
+	case map[string]any:
+		// summary entries and content blocks carry text under one of these
+		// fields. Do not recurse through arbitrary metadata or encrypted blobs.
+		found := false
+		for _, key := range []string{"text", "input_text", "output_text", "content", "output", "input", "arguments"} {
+			if nested, ok := item[key]; ok {
+				found = true
+				out = append(out, extractResponseValue(nested, role, tool)...)
+			}
+		}
+		if !found {
+			if encoded, err := json.Marshal(item); err == nil {
+				out = append(out, classifyText(string(encoded), role))
+				if tool && len(out) > 0 {
+					out[len(out)-1].Tool = true
+				}
+			}
+		}
+	default:
+		if encoded, err := json.Marshal(item); err == nil {
+			out = append(out, classifyText(string(encoded), role))
+		}
+	}
+	return out
+}
+
+func extractResponseTools(value any) []textPart {
+	var out []textPart
+	switch item := value.(type) {
+	case []any:
+		for _, raw := range item {
+			if encoded, err := json.Marshal(raw); err == nil {
+				out = append(out, textPart{Text: string(encoded), Role: "tool", Tool: true, Code: true})
+			}
+		}
+	case map[string]any:
+		if encoded, err := json.Marshal(item); err == nil {
+			out = append(out, textPart{Text: string(encoded), Role: "tool", Tool: true, Code: true})
+		}
+	}
+	return out
+}
+
+func extractResponseSchema(value any) []textPart {
+	encoded, err := json.Marshal(value)
+	if err != nil || strings.TrimSpace(string(encoded)) == "null" {
+		return nil
+	}
+	return []textPart{{Text: string(encoded), Role: "schema", Code: true}}
 }
 
 func extractMessages(value any, defaultRole string) []textPart {

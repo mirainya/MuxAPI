@@ -172,8 +172,8 @@ type CacheProfile struct {
 	// CoverageRatio is the fraction of the reusable prefix that the upstream
 	// actually caches. Some proxied upstreams only cache ~77% of the prefix.
 	// 0 or 1 means assume full prefix is cached (the standard behavior).
-	CoverageRatio float64 `json:"coverage_ratio,omitempty"`
-	Existing       CacheEntry `json:"existing"`
+	CoverageRatio float64    `json:"coverage_ratio,omitempty"`
+	Existing      CacheEntry `json:"existing"`
 	// PreferredTTL is the adaptive TTL selected by the scheduler based on
 	// session behavior. When longer than the default 5min, the forwarder may
 	// inject cache_control hints into the upstream request.
@@ -188,10 +188,20 @@ type CacheProfile struct {
 	// false by default.
 	CacheWriteIncludesInput bool `json:"cache_write_includes_input,omitempty"`
 	CacheReadIncludesInput  bool `json:"cache_read_includes_input,omitempty"`
-	// InputInflation is the observed ratio of actual billed input tokens to the
-	// router's estimated InputTokens. Upstreams that inject system prompts will
-	// have inflation > 1.0. The cost model uses this to correct the suffix size
-	// (InputTokens * inflation - ReusableInputTokens). 0 or 1 means no correction.
+	// ObservedInputTokens is the recent average of provider-reported uncached
+	// input tokens for this cache key. It captures provider-injected prompt
+	// tokens without treating them as a larger reusable prefix.
+	ObservedInputTokens float64 `json:"observed_input_tokens,omitempty"`
+	// ObservedCacheReadTokens and ObservedCacheWriteTokens are recent averages
+	// of provider-reported cache read/create tokens per request. Providers such
+	// as Claude can report both fields on the same request, so they must remain
+	// independent rather than being modeled as a hit-or-miss choice.
+	ObservedRequests         int64   `json:"observed_requests,omitempty"`
+	ObservedCacheReadTokens  float64 `json:"observed_cache_read_tokens,omitempty"`
+	ObservedCacheWriteTokens float64 `json:"observed_cache_write_tokens,omitempty"`
+	ObservedCacheCreateRate  float64 `json:"observed_cache_create_rate,omitempty"`
+	// InputInflation is deprecated and ignored. It remains in the wire model
+	// so older integrations can upgrade without a compile-time break.
 	InputInflation float64 `json:"input_inflation,omitempty"`
 }
 

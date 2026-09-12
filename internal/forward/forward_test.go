@@ -45,7 +45,8 @@ func TestForwardAuditsCompressedCodexSSE(t *testing.T) {
 	request.Header.Set("Accept-Encoding", "gzip, deflate, br")
 
 	result := fwd.Forward(recorder, request, []byte(`{"model":"gpt-5.6-sol","stream":true}`), 1, "")
-	if result.InputTokens != 4391 || result.OutputTokens != 5 || result.CachedTokens != 3385 {
+	// Codex Responses input_tokens includes cached_tokens.
+	if result.InputTokens != 1006 || result.OutputTokens != 5 || result.CachedTokens != 3385 {
 		t.Fatalf("compressed SSE usage was not audited: %+v", result)
 	}
 	if !result.StreamCompleted || result.LastEvent != "response.completed" {

@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -123,8 +124,10 @@ func (s *Store) RequestStats(filter RequestFilter) (*RequestStats, error) {
 				FILTER (WHERE r.duration_ms>0) AS BIGINT),0),
 			COALESCE(SUM(r.input_tokens),0),COALESCE(SUM(r.output_tokens),0),COALESCE(SUM(r.cached_tokens),0),
 			COALESCE(SUM(r.cache_creation_tokens),0),
-			COALESCE(SUM(CASE WHEN COALESCE(u.protocol,'')='claude'
-				THEN r.input_tokens+r.cached_tokens+r.cache_creation_tokens ELSE r.input_tokens END),0)
+			COALESCE(SUM(CASE WHEN r.input_tokens_normalized OR LOWER(COALESCE(u.protocol,'')) IN ('claude','anthropic','messages','anthropic-messages')
+				THEN r.input_tokens+r.cached_tokens+r.cache_creation_tokens
+				WHEN LOWER(COALESCE(u.protocol,'')) IN ('openai','chat','chat_completions','chat-completions','openai-response','openai_responses','responses','codex','gemini','google','generativelanguage','generatecontent')
+				THEN r.input_tokens+r.cache_creation_tokens ELSE r.input_tokens+r.cached_tokens+r.cache_creation_tokens END),0)
 			FROM requests r LEFT JOIN groups g ON g.id=r.group_id
 			LEFT JOIN upstreams u ON u.id=r.final_upstream_id`+where, args...).Scan(
 			&stats.Total, &stats.DirectSuccess, &stats.FailoverSuccess, &stats.Failed,
@@ -143,7 +146,7 @@ func (s *Store) RequestStats(filter RequestFilter) (*RequestStats, error) {
 		return stats, nil
 	}
 	rows, err := s.query(`SELECT r.outcome,r.attempt_count,r.ttft_ms,r.duration_ms,
-		r.input_tokens,r.output_tokens,r.cached_tokens,r.cache_creation_tokens,COALESCE(u.protocol,'')
+		r.input_tokens,r.input_tokens_normalized,r.output_tokens,r.cached_tokens,r.cache_creation_tokens,COALESCE(u.protocol,'')
 		FROM requests r LEFT JOIN groups g ON g.id=r.group_id
 		LEFT JOIN upstreams u ON u.id=r.final_upstream_id`+where, args...)
 	if err != nil {
@@ -156,8 +159,9 @@ func (s *Store) RequestStats(filter RequestFilter) (*RequestStats, error) {
 		var outcome string
 		var attempts int
 		var ttft, duration, input, output, cached, cacheCreation int64
+		var inputNormalized bool
 		var protocol string
-		if err := rows.Scan(&outcome, &attempts, &ttft, &duration, &input, &output, &cached, &cacheCreation, &protocol); err != nil {
+		if err := rows.Scan(&outcome, &attempts, &ttft, &duration, &input, &inputNormalized, &output, &cached, &cacheCreation, &protocol); err != nil {
 			return nil, err
 		}
 		stats.Total++
@@ -190,11 +194,7 @@ func (s *Store) RequestStats(filter RequestFilter) (*RequestStats, error) {
 		stats.OutputTokens += output
 		stats.CachedTokens += cached
 		stats.CacheCreationTokens += cacheCreation
-		if protocol == "claude" {
-			stats.CacheInputTokens += input + cached + cacheCreation
-		} else {
-			stats.CacheInputTokens += input
-		}
+		stats.CacheInputTokens += cacheInputTokens(input, cached, cacheCreation, protocol, inputNormalized)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -228,8 +228,10 @@ func (s *Store) RequestCacheStats(filter RequestFilter) ([]ChannelCacheStats, er
 	}
 	rows, err := s.query(`SELECT a.upstream_id,COALESCE(u.name,''),
 		COALESCE(SUM(CASE WHEN a.input_tokens>0 OR a.cached_tokens>0 OR a.cache_creation_tokens>0 THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN COALESCE(u.protocol,'')='claude'
-			THEN a.input_tokens+a.cached_tokens+a.cache_creation_tokens ELSE a.input_tokens END),0),
+		COALESCE(SUM(CASE WHEN a.input_tokens_normalized OR LOWER(COALESCE(u.protocol,'')) IN ('claude','anthropic','messages','anthropic-messages')
+			THEN a.input_tokens+a.cached_tokens+a.cache_creation_tokens
+			WHEN LOWER(COALESCE(u.protocol,'')) IN ('openai','chat','chat_completions','chat-completions','openai-response','openai_responses','responses','codex','gemini','google','generativelanguage','generatecontent')
+			THEN a.input_tokens+a.cache_creation_tokens ELSE a.input_tokens+a.cached_tokens+a.cache_creation_tokens END),0),
 		COALESCE(SUM(a.cached_tokens),0),COALESCE(SUM(a.cache_creation_tokens),0)
 		FROM request_attempts a
 		JOIN requests r ON r.request_id=a.request_id
@@ -263,6 +265,35 @@ func tokenCacheRate(cached, input int64) float64 {
 		return 1
 	}
 	return rate
+}
+
+func cacheInputTokens(input, cached, cacheCreation int64, protocol string, normalized bool) int64 {
+	if normalized || isExclusiveInputProtocol(protocol) {
+		return input + cached + cacheCreation
+	}
+	if isKnownInclusiveInputProtocol(protocol) {
+		// Legacy OpenAI/Responses rows stored input_tokens inclusively.
+		return input + cacheCreation
+	}
+	return input + cached + cacheCreation
+}
+
+func isExclusiveInputProtocol(protocol string) bool {
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case "claude", "anthropic", "messages", "anthropic-messages":
+		return true
+	default:
+		return false
+	}
+}
+
+func isKnownInclusiveInputProtocol(protocol string) bool {
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case "openai", "chat", "chat_completions", "chat-completions", "openai-response", "openai_responses", "responses", "codex", "gemini", "google", "generativelanguage", "generatecontent":
+		return true
+	default:
+		return false
+	}
 }
 
 func percentile(values []int64, quantile float64) int64 {

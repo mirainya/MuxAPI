@@ -16,25 +16,27 @@ import (
 
 // upstreamDTO 对外视图：api_key 脱敏，不回显完整凭证。
 type upstreamDTO struct {
-	ID           int64                `json:"id"`
-	Name         string               `json:"name"`
-	Source       string               `json:"source"`
-	PrimaryTagID int64                `json:"primary_tag_id"`
-	TagIDs       []int64              `json:"tag_ids"`
-	Tags         []upstream.Tag       `json:"tags"`
-	BaseURL      string               `json:"base_url"`
-	Proxy        string               `json:"proxy"`
-	Protocol     string               `json:"protocol"`
-	BillingType  string               `json:"billing_type"`
-	CacheMode    string               `json:"cache_mode"`
-	CreditRatio  float64              `json:"credit_ratio"`
-	APIKey       string               `json:"api_key,omitempty"` // 输入用；输出时脱敏到 masked
-	Masked       string               `json:"masked,omitempty"`
-	Enabled      bool                 `json:"enabled"`
-	ChannelProbe bool                 `json:"channel_probe"`          // 兼容旧数据；熔断固定为渠道级
-	Health       healthView           `json:"health"`                 // 运行时健康（仅 GET 列表填充）
-	ModelHealth  []modelHealthView    `json:"model_health,omitempty"` // 模型级健康（仅 GET 列表填充，无则省略）
-	Billing      *store.BillingStatus `json:"billing,omitempty"`
+	ID                    int64                `json:"id"`
+	Name                  string               `json:"name"`
+	Source                string               `json:"source"`
+	PrimaryTagID          int64                `json:"primary_tag_id"`
+	TagIDs                []int64              `json:"tag_ids"`
+	Tags                  []upstream.Tag       `json:"tags"`
+	BaseURL               string               `json:"base_url"`
+	Proxy                 string               `json:"proxy"`
+	Protocol              string               `json:"protocol"`
+	BillingType           string               `json:"billing_type"`
+	CacheMode             string               `json:"cache_mode"`
+	CreditRatio           float64              `json:"credit_ratio"`
+	APIKey                string               `json:"api_key,omitempty"` // 输入用；输出时脱敏到 masked
+	Masked                string               `json:"masked,omitempty"`
+	Enabled               bool                 `json:"enabled"`
+	ChannelProbe          bool                 `json:"channel_probe"`          // 兼容旧数据；熔断固定为渠道级
+	Health                healthView           `json:"health"`                 // 运行时健康（仅 GET 列表填充）
+	ModelHealth           []modelHealthView    `json:"model_health,omitempty"` // 模型级健康（仅 GET 列表填充，无则省略）
+	Billing               *store.BillingStatus `json:"billing,omitempty"`
+	TokenInflation        float64              `json:"token_inflation"`
+	TokenInflationSamples int64                `json:"token_inflation_samples"`
 }
 
 func mask(key string) string {
@@ -63,6 +65,17 @@ func (s *Server) adminUpstreams(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), 500)
 			return
 		}
+		var inflationStats map[int64]store.UpstreamTokenInflationStats
+		// The overview endpoint only needs lightweight billing data. Keep the
+		// token comparison on the full upstream-pool view to avoid adding a
+		// history scan to dashboard refreshes.
+		if r.URL.Query().Get("view") != "overview" {
+			inflationStats, err = s.store.ListUpstreamTokenInflationStats(24*time.Hour, time.Now())
+			if err != nil {
+				http.Error(w, err.Error(), 500)
+				return
+			}
+		}
 		out := make([]upstreamDTO, 0, len(list))
 		for _, u := range list {
 			item := upstreamDTO{
@@ -71,6 +84,10 @@ func (s *Server) adminUpstreams(w http.ResponseWriter, r *http.Request) {
 				Masked: mask(u.APIKey), Enabled: u.Enabled, ChannelProbe: u.ChannelProbe, CreditRatio: u.CreditRatio,
 				Health:      toHealthView(s.health.Snapshot(u.ID), s.health.EffectiveState(u.ID)),
 				ModelHealth: toModelHealthViews(s.health.ModelStates(u.ID)),
+			}
+			if stats, ok := inflationStats[u.ID]; ok {
+				item.TokenInflation = stats.TokenInflation
+				item.TokenInflationSamples = stats.TokenInflationSamples
 			}
 			if u.BillingType != upstream.BillingNone {
 				state, ok := billingStates[u.ID]

@@ -16,6 +16,7 @@ type tokenUsage struct {
 	output        int64
 	cached        int64
 	cacheCreation int64
+	normalized    bool
 }
 
 func (u *tokenUsage) merge(other tokenUsage) {
@@ -32,12 +33,14 @@ func (u *tokenUsage) merge(other tokenUsage) {
 	if other.cacheCreation > u.cacheCreation {
 		u.cacheCreation = other.cacheCreation
 	}
+	u.normalized = u.normalized || other.normalized
 }
 
 // responseAudit 在不影响响应转发的前提下提取完成状态和用量。
 // 非流式正文超过上限后放弃解析，防止审计逻辑放大内存占用。
 type responseAudit struct {
 	stream          bool
+	protocol        string
 	body            []byte
 	overflow        bool
 	sseBuffer       []byte
@@ -54,8 +57,12 @@ type auditReadCloser struct {
 	audit *responseAudit
 }
 
-func newAuditReadCloser(body io.ReadCloser, stream bool) *auditReadCloser {
-	return &auditReadCloser{ReadCloser: body, audit: &responseAudit{stream: stream}}
+func newAuditReadCloser(body io.ReadCloser, stream bool, protocol ...string) *auditReadCloser {
+	hint := ""
+	if len(protocol) > 0 {
+		hint = strings.TrimSpace(protocol[0])
+	}
+	return &auditReadCloser{ReadCloser: body, audit: &responseAudit{stream: stream, protocol: hint}}
 }
 
 func (r *auditReadCloser) Read(p []byte) (int, error) {
@@ -106,7 +113,7 @@ func (a *responseAudit) finish() {
 		return
 	}
 	if !a.overflow {
-		a.usage.merge(usageFromJSON(a.body))
+		a.usage.merge(usageFromJSON(a.body, a.protocol))
 	}
 }
 
@@ -172,7 +179,7 @@ func (a *responseAudit) consumeSSEBlock(block []byte) {
 		a.lastEvent = "generateContent.completed"
 		a.streamCompleted = true
 	}
-	a.usage.merge(usageFromValue(payload))
+	a.usage.merge(usageFromValue(payload, a.protocol))
 }
 
 func geminiResponseComplete(payload map[string]any) bool {
@@ -217,31 +224,41 @@ func clipLabel(value string) string {
 	return clipUTF8(strings.TrimSpace(value), 80)
 }
 
-func usageFromJSON(data []byte) tokenUsage {
+func usageFromJSON(data []byte, protocol ...string) tokenUsage {
 	var value any
 	if len(bytes.TrimSpace(data)) == 0 || json.Unmarshal(data, &value) != nil {
 		return tokenUsage{}
 	}
-	return usageFromValue(value)
+	return usageFromValue(value, protocol...)
 }
 
 // usageFromValue 兼容顶层 usage 以及 Responses/Claude 的嵌套 usage。
-func usageFromValue(value any) tokenUsage {
+func usageFromValue(value any, protocol ...string) tokenUsage {
 	root, ok := value.(map[string]any)
 	if !ok {
 		return tokenUsage{}
 	}
+	hint := usageProtocolHint(protocol...)
+	if hint == "" {
+		hint = inferUsageProtocol(root)
+	}
 	var out tokenUsage
 	mergeUsageObject := func(candidate any) {
 		if object, ok := candidate.(map[string]any); ok {
-			out.merge(parseUsageObject(object))
+			out.merge(parseUsageObject(object, hint))
 		}
 	}
 	mergeUsageObject(root["usage"])
 	mergeUsageObject(root["usageMetadata"])
 	for _, key := range []string{"response", "message"} {
 		if nested, ok := root[key].(map[string]any); ok {
-			mergeUsageObject(nested["usage"])
+			nestedHint := hint
+			if nestedHint == "" && key == "response" {
+				nestedHint = "responses"
+			}
+			if object, ok := nested["usage"].(map[string]any); ok {
+				out.merge(parseUsageObject(object, nestedHint))
+			}
 		}
 	}
 	return out
@@ -250,24 +267,27 @@ func usageFromValue(value any) tokenUsage {
 // parseUsageObject 将 OpenAI / Anthropic / Gemini 的 usage 归一为统一计数。
 //
 // 语义 (Anthropic 约定):
-//   input          = uncached prompt tokens (排他,不含 cached / cacheCreation)
-//   cached         = cache_read tokens (命中缓存部分)
-//   cacheCreation  = cache_write tokens (首次写入部分)
-//   output         = completion / response tokens
+//
+//	input          = uncached prompt tokens (排他,不含 cached / cacheCreation)
+//	cached         = cache_read tokens (命中缓存部分)
+//	cacheCreation  = cache_write tokens (首次写入部分)
+//	output         = completion / response tokens
 //
 // 协议差异:
-//   Anthropic:  usage.input_tokens 本身就是 uncached; cache_read_input_tokens /
-//               cache_creation_input_tokens 独立字段。
-//   OpenAI:     usage.prompt_tokens 是 INCLUSIVE 的 —— 已经包含 cached。
-//               cached 出现在 usage.cached_tokens 或 prompt_tokens_details.cached_tokens。
-//   Gemini:     usage.promptTokenCount 是 INCLUSIVE 的 —— 已经包含 cachedContentTokenCount。
 //
-// 因此对 OpenAI/Gemini 需要在这里减去 cached,让存入 routing_observations 的
-// input 列在所有协议下保持"uncached"这个不变量。下游 SQL (CacheCoverageRatio,
-// TokenInflationFactor) 依赖这个不变量;不做归一它们会双数 cached。
-func parseUsageObject(usage map[string]any) tokenUsage {
-	inputAnthropic := number(usage["input_tokens"])
-	inputInclusive := maxInt64(number(usage["prompt_tokens"]), number(usage["promptTokenCount"]))
+//	Anthropic:  usage.input_tokens 本身就是 uncached; cache_read_input_tokens /
+//	            cache_creation_input_tokens 独立字段。
+//	OpenAI Chat/Responses/Codex: prompt_tokens 或 input_tokens 是 INCLUSIVE 的 ——
+//	            已经包含 cached。cached 出现在 cached_tokens、
+//	            input_tokens_details.cached_tokens 或 prompt_tokens_details.cached_tokens。
+//	Gemini:     usage.promptTokenCount 是 INCLUSIVE 的 —— 已经包含 cachedContentTokenCount。
+//
+// 因此对 OpenAI/Gemini/Responses/Codex 需要在这里减去 cached,让存入 routing_observations 的
+// input 列在所有协议下保持"uncached"这个不变量。下游缓存用量统计依赖这个
+// 不变量；不做归一会把 cached 重复计入 input。
+func parseUsageObject(usage map[string]any, protocol ...string) tokenUsage {
+	inputTokens := maxInt64(number(usage["input_tokens"]), number(usage["prompt_tokens"]))
+	inputTokens = maxInt64(inputTokens, number(usage["promptTokenCount"]))
 	output := maxInt64(maxInt64(maxInt64(number(usage["output_tokens"]), number(usage["completion_tokens"])), number(usage["candidatesTokenCount"])), number(usage["thoughtsTokenCount"]))
 	cached := maxInt64(maxInt64(number(usage["cached_tokens"]), number(usage["cache_read_input_tokens"])), number(usage["cachedContentTokenCount"]))
 	cacheCreation := maxInt64(number(usage["cache_creation_tokens"]), number(usage["cache_creation_input_tokens"]))
@@ -276,19 +296,52 @@ func parseUsageObject(usage map[string]any) tokenUsage {
 			cached = maxInt64(cached, number(details["cached_tokens"]))
 		}
 	}
-	// Anthropic 已经是排他语义,直接采用其 input_tokens。
-	// OpenAI/Gemini 的 inputInclusive 减 cached 得到与 Anthropic 一致的排他值。
-	input := inputAnthropic
-	if inputInclusive > input {
-		normalized := inputInclusive - cached
-		if normalized < 0 {
-			normalized = 0
-		}
-		if normalized > input {
-			input = normalized
+	input := inputTokens
+	hint := usageProtocolHint(protocol...)
+	if hint == "" {
+		hint = inferUsageProtocol(usage)
+	}
+	if usageInputInclusive(hint, usage) {
+		input -= cached
+		if input < 0 {
+			input = 0
 		}
 	}
-	return tokenUsage{input: input, output: output, cached: cached, cacheCreation: cacheCreation}
+	return tokenUsage{input: input, output: output, cached: cached, cacheCreation: cacheCreation, normalized: hint != ""}
+}
+
+func usageProtocolHint(protocol ...string) string {
+	if len(protocol) == 0 {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(protocol[0]))
+}
+
+func inferUsageProtocol(object map[string]any) string {
+	if number(object["promptTokenCount"]) > 0 || number(object["cachedContentTokenCount"]) > 0 {
+		return "gemini"
+	}
+	if number(object["prompt_tokens"]) > 0 || object["prompt_tokens_details"] != nil || object["input_tokens_details"] != nil {
+		return "responses"
+	}
+	if object["cache_read_input_tokens"] != nil || object["cache_creation_input_tokens"] != nil {
+		return "claude"
+	}
+	return ""
+}
+
+func usageInputInclusive(protocol string, usage map[string]any) bool {
+	switch protocol {
+	case "claude", "anthropic", "messages", "anthropic-messages":
+		return false
+	case "gemini", "google", "generativelanguage", "generatecontent",
+		"responses", "openai-response", "openai_responses", "codex":
+		return true
+	case "openai", "chat", "chat_completions", "chat-completions":
+		return number(usage["prompt_tokens"]) > 0 || usage["prompt_tokens_details"] != nil || usage["input_tokens_details"] != nil || number(usage["cached_tokens"]) > 0
+	default:
+		return number(usage["prompt_tokens"]) > 0 || number(usage["promptTokenCount"]) > 0 || usage["input_tokens_details"] != nil || usage["prompt_tokens_details"] != nil
+	}
 }
 
 func number(value any) int64 {

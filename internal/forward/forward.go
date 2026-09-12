@@ -215,55 +215,60 @@ type AttemptResult struct {
 	AttemptNo int
 	// Protocol 快照本次尝试实际使用的渠道协议。费用比对靠它决定 cached_tokens
 	// 的口径，事后现查会用改动后的协议解释历史用量。
-	Protocol            string
-	MappedModel         string
-	UpstreamID          int64
-	Priority            int
-	SelectionReason     string
-	HealthBefore        string
-	HealthAfter         string
-	Status              int
-	Outcome             string
-	TTFTMs              int64
-	DurationMs          int64
-	ResponseBytes       int64
-	Stream              bool
-	StreamCompleted     bool
-	LastEvent           string
-	InputTokens         int64
-	OutputTokens        int64
-	CachedTokens        int64
-	CacheCreationTokens int64
-	UpstreamRequestID   string
-	ErrorKind           string
-	ErrorSource         string
-	CreatedAt           time.Time
-	CompletedAt         time.Time
-	Error               string
-	UpstreamKeyHash     string
-	RouteDecision       *routing.Decision
+	Protocol        string
+	MappedModel     string
+	UpstreamID      int64
+	Priority        int
+	SelectionReason string
+	HealthBefore    string
+	HealthAfter     string
+	Status          int
+	Outcome         string
+	TTFTMs          int64
+	DurationMs      int64
+	ResponseBytes   int64
+	Stream          bool
+	StreamCompleted bool
+	LastEvent       string
+	InputTokens     int64
+	// InputTokensNormalized indicates that InputTokens excludes cached and
+	// cache-creation tokens. It lets storage distinguish new canonical rows
+	// from legacy OpenAI/Responses rows where input_tokens was inclusive.
+	InputTokensNormalized bool
+	OutputTokens          int64
+	CachedTokens          int64
+	CacheCreationTokens   int64
+	UpstreamRequestID     string
+	ErrorKind             string
+	ErrorSource           string
+	CreatedAt             time.Time
+	CompletedAt           time.Time
+	Error                 string
+	UpstreamKeyHash       string
+	RouteDecision         *routing.Decision
 }
 
 // Result 汇总最终响应及按时间排列的全部上游尝试。
 type Result struct {
-	Status              int
-	Outcome             string
-	FinalUpstreamID     int64
-	TTFTMs              int64
-	ResponseBytes       int64
-	StreamCompleted     bool
-	LastEvent           string
-	InputTokens         int64
-	OutputTokens        int64
-	CachedTokens        int64
-	CacheCreationTokens int64
-	UpstreamRequestID   string
-	ErrorKind           string
-	ErrorSource         string
-	Error               string
-	Attempts            []AttemptResult
-	RouteFeatures       routing.RequestFeatures
-	RouteDecision       *routing.Decision
+	Status                int
+	Outcome               string
+	FinalUpstreamID       int64
+	TTFTMs                int64
+	ResponseBytes         int64
+	StreamCompleted       bool
+	LastEvent             string
+	InputTokens           int64
+	InputTokensNormalized bool
+	OutputTokens          int64
+	CachedTokens          int64
+	CacheCreationTokens   int64
+	UpstreamRequestID     string
+	ErrorKind             string
+	ErrorSource           string
+	Error                 string
+	Attempts              []AttemptResult
+	RouteFeatures         routing.RequestFeatures
+	RouteDecision         *routing.Decision
 }
 
 type attemptContext struct {
@@ -298,7 +303,7 @@ func (a attemptContext) finish(h Health, status int, outcome string, relay relay
 		SelectionReason: a.selectionReason, HealthBefore: a.healthBefore, HealthAfter: healthState(h, a.upstreamID),
 		Status: status, Outcome: outcome, TTFTMs: relay.ttftMs, DurationMs: completed.Sub(a.started).Milliseconds(),
 		ResponseBytes: relay.bytesSent, Stream: relay.stream, StreamCompleted: relay.streamCompleted,
-		LastEvent: relay.lastEvent, InputTokens: relay.usage.input, OutputTokens: relay.usage.output,
+		LastEvent: relay.lastEvent, InputTokens: relay.usage.input, InputTokensNormalized: relay.usage.normalized, OutputTokens: relay.usage.output,
 		CachedTokens: relay.usage.cached, CacheCreationTokens: relay.usage.cacheCreation,
 		UpstreamRequestID: relay.upstreamRequestID,
 		ErrorKind:         errorKind, ErrorSource: errorSource,
@@ -312,7 +317,7 @@ func resultFromAttempt(attempt AttemptResult, attempts []AttemptResult) Result {
 		Status: attempt.Status, Outcome: attempt.Outcome, FinalUpstreamID: attempt.UpstreamID,
 		TTFTMs: attempt.TTFTMs, ResponseBytes: attempt.ResponseBytes,
 		StreamCompleted: attempt.StreamCompleted, LastEvent: attempt.LastEvent,
-		InputTokens: attempt.InputTokens, OutputTokens: attempt.OutputTokens, CachedTokens: attempt.CachedTokens,
+		InputTokens: attempt.InputTokens, InputTokensNormalized: attempt.InputTokensNormalized, OutputTokens: attempt.OutputTokens, CachedTokens: attempt.CachedTokens,
 		CacheCreationTokens: attempt.CacheCreationTokens,
 		UpstreamRequestID:   attempt.UpstreamRequestID, ErrorKind: attempt.ErrorKind,
 		ErrorSource: attempt.ErrorSource, Error: attempt.Error, Attempts: attempts,
@@ -553,7 +558,7 @@ func (f *Forwarder) Forward(w http.ResponseWriter, r *http.Request, body []byte,
 				resp.Header.Set("Content-Type", "application/json")
 			}
 			resp.Body = io.NopCloser(bytes.NewReader(clientPayload))
-			result := relayResponse(w, resp, start, nil)
+			result := relayResponse(w, resp, start, nil, candidate.Protocol)
 			release()
 			if result.err != nil {
 				finished := attemptCtx.finish(f.health, StatusClientClosedRequest, OutcomeCanceled,
@@ -583,7 +588,7 @@ func (f *Forwarder) Forward(w http.ResponseWriter, r *http.Request, body []byte,
 		}
 
 		// relayResult.committed 表示响应是否已写出；只有未写出时才能安全换源。
-		result := relayTranslatedResponse(r.Context(), w, resp, start, markOutput, exchange)
+		result := relayTranslatedResponse(r.Context(), w, resp, start, markOutput, exchange, string(targetFormat))
 		watchdog.stop()
 		cause := context.Cause(ctx)
 		cancel(nil)
@@ -870,16 +875,16 @@ type relayResult struct {
 	upstreamRequestID string
 }
 
-func relayResponse(w http.ResponseWriter, resp *http.Response, start time.Time, onOutput func()) relayResult {
-	return relayTranslatedResponse(context.Background(), w, resp, start, onOutput, nil)
+func relayResponse(w http.ResponseWriter, resp *http.Response, start time.Time, onOutput func(), protocol ...string) relayResult {
+	return relayTranslatedResponse(context.Background(), w, resp, start, onOutput, nil, protocol...)
 }
 
 // relayTranslatedResponse 按"上游是否流式"和"客户端是否要求流式"选择转发方式。
 // auditReadCloser 在同一次读取中旁路提取完成事件、Token 用量和请求 ID。
-func relayTranslatedResponse(ctx context.Context, w http.ResponseWriter, resp *http.Response, start time.Time, onOutput func(), exchange *translate.Exchange) relayResult {
+func relayTranslatedResponse(ctx context.Context, w http.ResponseWriter, resp *http.Response, start time.Time, onOutput func(), exchange *translate.Exchange, protocol ...string) relayResult {
 	contentType := resp.Header.Get("Content-Type")
 	stream := strings.HasPrefix(contentType, "text/event-stream")
-	audited := newAuditReadCloser(resp.Body, stream)
+	audited := newAuditReadCloser(resp.Body, stream, protocol...)
 	resp.Body = audited
 	defer resp.Body.Close()
 	var result relayResult

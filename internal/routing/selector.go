@@ -69,6 +69,7 @@ type CandidateEvaluation struct {
 	CandidateID      int64        `json:"candidate_id"`
 	CandidateName    string       `json:"candidate_name"`
 	Protocol         string       `json:"protocol,omitempty"`
+	Pricing          Pricing      `json:"pricing"`
 	Eligible         bool         `json:"eligible"`
 	RejectReason     string       `json:"reject_reason,omitempty"`
 	Cost             CostEstimate `json:"cost"`
@@ -123,6 +124,7 @@ func Choose(request Request) (Decision, error) {
 		performance := candidate.Performance.normalized()
 		evaluation := CandidateEvaluation{
 			CandidateID: candidate.ID, CandidateName: candidate.Name, Protocol: candidate.Protocol,
+			Pricing:  candidate.Price,
 			Priority: candidate.Priority, Samples: performance.Samples,
 			P95TTFTMs: performance.P95TTFTMs, P95DurationMs: performance.P95DurationMs,
 			SuccessRate: performance.SuccessRate, PricingSource: candidate.Price.Source,

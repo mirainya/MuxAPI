@@ -1954,6 +1954,7 @@ const {
   fmtBytes, fmtNum, requestOutcomeText, requestOutcomeClass, errorKindText,
   errorSourceText, selectionText, streamStateText, outcomeText, fmtTime, fmtTimeFull, statusText,
   fmtEndpoint, clientName, cacheRateText, cacheSummary, cacheRateWidth,
+  billedInputTokens, tokenInflation, tokenInflationText, tokenInflationClass,
 } = useLogs({ page, guard })
 // 监控项 CRUD
 const monModels = ref([])  // 当前对话框选中渠道的可选模型（datalist）
@@ -2536,7 +2537,7 @@ function logout() {
               </button>
               <div v-if="!collapsedUpstreamTags.has(section.key)" class="table-wrap upstream-table-wrap">
                 <table class="upstream-table">
-                  <thead><tr><th class="select-cell"><input type="checkbox" :checked="section.rows.every(u => upstreamSelected.has(u.id))" :aria-label="`选择 ${section.name}`" @change="toggleUpstreamSectionSelection(section.rows)" /></th><th></th><th>名称</th><th>标签</th><th>地址</th><th>协议</th><th>计费</th><th>运行时</th><th>成功率</th><th>操作</th></tr></thead>
+                  <thead><tr><th class="select-cell"><input type="checkbox" :checked="section.rows.every(u => upstreamSelected.has(u.id))" :aria-label="`选择 ${section.name}`" @change="toggleUpstreamSectionSelection(section.rows)" /></th><th></th><th>名称</th><th>标签</th><th>地址</th><th>协议</th><th>计费</th><th>运行时</th><th>成功率</th><th>Token 膨胀（24h）</th><th>操作</th></tr></thead>
                   <tbody>
                     <!-- template 包两行：明细行必须与主行同处 v-for 作用域内 -->
                     <template v-for="u in section.rows" :key="u.id">
@@ -2580,6 +2581,11 @@ function logout() {
                       </td>
                       <td><span class="state-badge" :class="rtClass(u.health)">{{ u.enabled ? rtLabel(u.health) : '已停用' }}</span></td>
                       <td>{{ rtRate(u.health) }}</td>
+                      <td class="token-inflation-cell">
+                        <span v-if="u.token_inflation_samples" class="token-inflation" :class="tokenInflationClass(u)" :title="`最近 24 小时 ${u.token_inflation_samples} 个样本，实际计费输入 ÷ 客户端估算输入`">{{ tokenInflationText(u) }}</span>
+                        <span v-if="u.token_inflation_samples" class="log-sub">{{ u.token_inflation_samples }} 个样本</span>
+                        <span v-else class="tag-empty">暂无样本</span>
+                      </td>
                       <td>
                         <button v-if="u.health?.state === 'OPEN' || u.health?.state === 'HALF_OPEN'" class="icon-btn" title="手动恢复渠道" :disabled="recoveringUpstreams.has(u.id)" @click="guard(() => recoverUpstream(u))"><Icon name="refresh" :size="16" /></button>
                         <button class="btn-link sm" @click="testUpstream(u)">测试</button><button class="btn-link sm" @click="openBatchMonitors(u)">建监控</button>
@@ -2587,7 +2593,7 @@ function logout() {
                       </td>
                     </tr>
                     <tr v-if="billingDetailOpen.has(u.id)" class="billing-detail-row">
-                      <td colspan="10">
+                      <td colspan="11">
                         <div class="billing-detail">
                           <div class="billing-detail-head">
                             <strong>费用比对明细</strong>
@@ -2803,7 +2809,7 @@ function logout() {
                   </td>
                   <td><span class="log-status" :class="requestOutcomeClass(l)">{{ requestOutcomeText(l) }} · {{ statusText(l.status) }}</span><span v-if="l.error_kind" class="log-sub error-kind">{{ errorKindText(l.error_kind) }}</span></td>
                   <td><b class="log-metric">{{ fmtMs(l.ttft_ms) }}</b><span class="log-sub">总计 {{ fmtMs(l.duration_ms) }}</span></td>
-                  <td><b class="log-metric">{{ fmtNum(l.input_tokens) }} / {{ fmtNum(l.output_tokens) }}</b><span class="log-sub">{{ cacheSummary(l) }}</span></td>
+                  <td><b class="log-metric">{{ fmtNum(l.input_tokens) }} / {{ fmtNum(l.output_tokens) }}</b><span class="log-sub">{{ cacheSummary(l) }}</span><span v-if="tokenInflation(l)" class="log-sub token-inflation" :class="tokenInflationClass(l)" title="实际计费输入 ÷ 客户端估算输入">膨胀 {{ tokenInflationText(l) }}</span></td>
                   <td><b class="log-metric">{{ fmtBytes(l.response_bytes) }}</b><span class="log-sub">{{ streamStateText(l) }}</span></td>
                 </tr>
                 <tr v-if="!logs.length"><td colspan="9" class="empty-cell">{{ logLoading ? '加载中…' : '没有符合条件的请求记录。' }}</td></tr>
@@ -3149,6 +3155,9 @@ function logout() {
               <div><span>请求体</span><b>{{ fmtBytes(logDetail.request_bytes) }}</b></div>
               <div><span>响应体</span><b>{{ fmtBytes(logDetail.response_bytes) }}</b></div>
               <div><span>输入 Token</span><b>{{ fmtNum(logDetail.input_tokens) }}</b></div>
+              <div><span>实际输入 Token</span><b>{{ billedInputTokens(logDetail) ? fmtNum(billedInputTokens(logDetail)) : '—' }}</b></div>
+              <div><span>客户端估算输入</span><b>{{ logDetail.estimated_input_tokens ? fmtNum(logDetail.estimated_input_tokens) : '—' }}</b></div>
+              <div><span>Token 膨胀系数</span><b class="token-inflation" :class="tokenInflationClass(logDetail)">{{ tokenInflationText(logDetail) }}</b></div>
               <div><span>输出 Token</span><b>{{ fmtNum(logDetail.output_tokens) }}</b></div>
               <div><span>缓存 Token / 命中率</span><b>{{ fmtNum(logDetail.cached_tokens) }} / {{ cacheRateText(logDetail) }}</b></div>
               <div><span>流结束</span><b>{{ streamStateText(logDetail) }}</b></div>

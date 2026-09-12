@@ -12,7 +12,9 @@ require (
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/router-for-me/CLIProxyAPI/v7 v7.2.80
+	github.com/tidwall/gjson v1.18.0
 	github.com/tidwall/sjson v1.2.5
+	github.com/tiktoken-go/tokenizer v0.7.0
 	gorm.io/driver/postgres v1.6.2
 	gorm.io/gorm v1.31.2
 	modernc.org/sqlite v1.51.0
@@ -33,6 +35,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.38.1 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.45.1 // indirect
 	github.com/aws/smithy-go v1.27.5 // indirect
+	github.com/dlclark/regexp2 v1.11.5 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/glebarez/go-sqlite v1.21.2 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
@@ -45,7 +48,6 @@ require (
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
-	github.com/tidwall/gjson v1.18.0 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.0 // indirect
 	golang.org/x/crypto v0.54.0 // indirect
