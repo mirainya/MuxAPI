@@ -7,6 +7,7 @@ const REQUEST_TIMEOUT_MS = 15000
 // 生产库通过 SSH 隧道访问时，管理列表查询可能需要几十秒；页面不应过早中断。
 const HEAVY_REQUEST_TIMEOUT_MS = 90000
 const TEST_TIMEOUT_MS = 60000
+const UPDATE_TIMEOUT_MS = 10 * 60 * 1000
 
 function timedAbortSignal(externalSignal, timeoutMs) {
   const controller = new AbortController()
@@ -287,6 +288,10 @@ export const api = {
   // 运行时设置
   getSettings: () => req('GET', '/settings'),
   saveSettings: s => req('PUT', '/settings', s),
+
+  // GitHub Release updater
+  updates: () => req('GET', '/updates', undefined, HEAVY_REQUEST_TIMEOUT_MS),
+  applyUpdate: version => req('POST', '/updates', { version }, UPDATE_TIMEOUT_MS),
 
   // 请求记录（游标分页 + 服务端筛选）。
   logs: (opts = {}, signal, timeoutMs = REQUEST_TIMEOUT_MS) => {

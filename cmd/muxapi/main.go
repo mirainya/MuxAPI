@@ -24,6 +24,7 @@ import (
 	"github.com/mirainya/muxapi/internal/scheduler"
 	"github.com/mirainya/muxapi/internal/server"
 	"github.com/mirainya/muxapi/internal/store"
+	"github.com/mirainya/muxapi/internal/update"
 	"github.com/mirainya/muxapi/internal/upstream"
 )
 
@@ -31,6 +32,13 @@ import (
 var Version = "dev"
 
 func main() {
+	if len(os.Args) >= 3 && os.Args[1] == "--muxapi-apply-update" {
+		if err := update.ApplyManifest(os.Args[2]); err != nil {
+			slog.Error("self-update failed", "err", err)
+			os.Exit(1)
+		}
+		return
+	}
 	cfg := config.Load()
 	if cfg.AdminToken == "" {
 		slog.Warn("MUXAPI_TOKEN 未设置：管理后台无鉴权，切勿对外暴露")
@@ -257,6 +265,8 @@ func main() {
 	srv := server.New(fwd, cfg.AdminToken, st, hm, mon, monProber, maxBodyValue.Load())
 	srv.SetReadOnly(cfg.ReadOnly)
 	srv.SetVersion(Version)
+	updateSvc := update.New(Version, update.HealthURL(cfg.Addr))
+	srv.SetUpdateService(updateSvc)
 	srv.SetMaxBodyProvider(maxBodyValue.Load)
 	srv.SetSettingsChanged(func() {
 		if err := runtimeSettings.Reload(); err != nil {
@@ -276,6 +286,7 @@ func main() {
 	// 收到 SIGINT/SIGTERM 时取消：停探测并触发优雅关闭
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	updateSvc.SetRestartFunc(stop)
 	// 后台 goroutine 用 WaitGroup 跟踪：Shutdown 后等它们退出再 st.Close()，
 	// 消除退出期探测/清理仍在写库而 DB 已关的竞态。
 	var wg sync.WaitGroup

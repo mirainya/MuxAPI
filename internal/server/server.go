@@ -25,6 +25,7 @@ import (
 	"github.com/mirainya/muxapi/internal/monitor"
 	"github.com/mirainya/muxapi/internal/store"
 	"github.com/mirainya/muxapi/internal/translate"
+	"github.com/mirainya/muxapi/internal/update"
 	"github.com/mirainya/muxapi/internal/upstream"
 	muxweb "github.com/mirainya/muxapi/web"
 )
@@ -47,6 +48,7 @@ type Server struct {
 	monProber       *monitor.Prober
 	billingMgr      *billing.Manager
 	backupSvc       *backup.Service
+	updateSvc       *update.Service
 	version         string
 	maxBody         int64 // 请求体字节上限（<=0 表示不限制）
 	maxBodyProvider func() int64
@@ -70,6 +72,9 @@ func (s *Server) SetBillingManager(manager *billing.Manager) { s.billingMgr = ma
 
 // SetBackupService enables the S3 backup feature.
 func (s *Server) SetBackupService(svc *backup.Service) { s.backupSvc = svc }
+
+// SetUpdateService enables authenticated release discovery and self-update.
+func (s *Server) SetUpdateService(svc *update.Service) { s.updateSvc = svc }
 
 // SetMaxBodyProvider supplies the current request body limit without requiring
 // a process restart after a settings update.

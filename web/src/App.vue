@@ -229,8 +229,72 @@ async function guard(fn) {
 }
 
 const appVersion = ref('')
+const updatePanelOpen = ref(false)
+const updateCatalog = ref(null)
+const updateLoading = ref(false)
+const updateError = ref('')
+const updateConfirmVersion = ref('')
+const updateApplying = ref(false)
+const updateLatest = computed(() => {
+  const releases = updateCatalog.value?.releases || []
+  return releases.find(item => item.newer && !item.prerelease && item.asset)
+    || (['', 'dev'].includes(updateCatalog.value?.current) ? releases.find(item => !item.prerelease && item.asset) : null)
+})
+function updateDate(value) {
+  if (!value) return '未标注日期'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '未标注日期' : date.toLocaleDateString()
+}
+function updateReleaseLabel(release) {
+  if (release.current) return '当前'
+  if (release.newer) return '可更新'
+  return release.prerelease ? '预览' : '历史'
+}
+async function loadUpdateCatalog() {
+  updateLoading.value = true
+  updateError.value = ''
+  try {
+    updateCatalog.value = await api.updates()
+  } catch (e) {
+    updateError.value = String(e.message || e)
+  } finally {
+    updateLoading.value = false
+  }
+}
+function toggleUpdatePanel() {
+  updatePanelOpen.value = !updatePanelOpen.value
+  if (updatePanelOpen.value && !updateLoading.value) void loadUpdateCatalog()
+}
+function askUpdate(release) {
+  if (!release?.version || !release.asset || updateApplying.value) return
+  updateConfirmVersion.value = release.version
+}
+function cancelUpdate() {
+  if (!updateApplying.value) updateConfirmVersion.value = ''
+}
+async function applySelectedUpdate() {
+  const version = updateConfirmVersion.value
+  if (!version || updateApplying.value) return
+  updateApplying.value = true
+  updateError.value = ''
+  try {
+    await api.applyUpdate(version)
+    updateConfirmVersion.value = ''
+    updatePanelOpen.value = false
+    flash(`正在更新到 ${version}，服务会短暂重启`)
+    window.setTimeout(() => window.location.reload(), 3500)
+  } catch (e) {
+    updateError.value = String(e.message || e)
+  } finally {
+    updateApplying.value = false
+  }
+}
+function onDocumentPointerDown(event) {
+  if (!event.target.closest('.version-control')) updatePanelOpen.value = false
+}
 onMounted(() => {
   fetch('/admin/version').then(r => r.json()).then(d => { appVersion.value = d.version || 'dev' }).catch(() => {})
+  document.addEventListener('pointerdown', onDocumentPointerDown)
   if (loggedIn.value) activatePage(page.value)
 })
 
@@ -258,6 +322,7 @@ function stopRtPoll() { if (rtTimer) { clearInterval(rtTimer); rtTimer = null } 
 function stopAllPoll() { stopMonPoll(); stopOverviewPoll(); stopRtPoll(); stopLogPoll() }
 onUnmounted(() => {
   stopAllPoll()
+  document.removeEventListener('pointerdown', onDocumentPointerDown)
   abortUpstreamTestRequests?.()
   abortGroupTestRequests?.()
 })
@@ -2162,7 +2227,23 @@ function logout() {
         <h1 class="app-page-title">{{ detailGroup ? detailGroup.name : pages[page].title }}</h1>
         <p class="app-page-desc">{{ detailGroup ? '管理该分组的上游成员与接入密钥' : pages[page].desc }}</p>
       </div>
-      <div class="app-topbar-actions"><span v-if="appVersion" class="app-version">{{ appVersion }}</span><ThemePicker /><button class="btn-link sm" @click="logout">退出</button></div>
+      <div class="app-topbar-actions">
+        <div class="version-control" @click.stop>
+          <button class="app-version" type="button" :aria-expanded="updatePanelOpen" title="查看软件版本" @click="toggleUpdatePanel"><span>{{ appVersion || 'dev' }}</span><Icon name="chevron-down" :size="13" /></button>
+          <section v-if="updatePanelOpen" class="version-menu" aria-label="软件版本">
+            <header class="version-menu-head"><div><small>软件版本</small><strong>{{ updateCatalog?.current || appVersion || 'dev' }}</strong></div><button class="icon-btn" type="button" title="关闭" aria-label="关闭版本面板" @click="updatePanelOpen = false"><Icon name="x" :size="14" /></button></header>
+            <div v-if="updateLoading" class="version-state"><Icon name="loader" class="spin" :size="16" />读取发行版</div>
+            <div v-else-if="updateError" class="version-error"><Icon name="alert" :size="15" /><span>{{ updateError }}</span><button class="btn-link sm" type="button" @click="loadUpdateCatalog">重试</button></div>
+            <template v-else-if="updateCatalog">
+              <div class="version-summary"><div><small>当前版本</small><strong>{{ updateCatalog.current }}</strong></div><Icon name="arrow-right" :size="15" /><div><small>最新版本</small><strong>{{ updateCatalog.latest || '—' }}</strong></div></div>
+              <div v-if="updateLatest" class="version-latest"><div><span>发现新版本</span><strong>{{ updateLatest.version }}</strong><small>{{ updateDate(updateLatest.published_at) }} · {{ updateCatalog.platform }}/{{ updateCatalog.architecture }}</small></div><button class="btn btn-sm" type="button" @click="askUpdate(updateLatest)"><Icon name="download" :size="14" />更新</button></div>
+              <p v-else class="version-up-to-date"><Icon name="check" :size="14" />当前已是可用的最新版本</p>
+              <div class="version-history"><div class="version-history-title">发行版</div><a v-for="release in updateCatalog.releases" :key="release.version" :href="release.url" target="_blank" rel="noopener noreferrer" class="version-release-row"><span><strong>{{ release.version }}</strong><small>{{ updateDate(release.published_at) }}</small></span><em :class="{ current: release.current, newer: release.newer }">{{ updateReleaseLabel(release) }}</em><Icon name="external-link" :size="13" /></a><span v-if="!updateCatalog.releases.length" class="version-empty">暂无发行版</span></div>
+            </template>
+          </section>
+        </div>
+        <ThemePicker /><button class="btn-link sm" @click="logout">退出</button>
+      </div>
     </header>
 
     <aside class="subnav-rail">
@@ -3288,6 +3369,18 @@ function logout() {
         <div class="dialog-foot">
           <button class="btn btn-ghost" @click="confirmState.show = false">取消</button>
           <button class="btn btn-danger" @click="confirmOk"><Icon name="trash" :size="16" />确认删除</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="mask" v-if="updateConfirmVersion" @click.self="cancelUpdate">
+      <div class="dialog dialog-sm update-dialog">
+        <h3>更新 MuxAPI</h3>
+        <p class="confirm-msg update-confirm-msg">将更新到 <b>{{ updateConfirmVersion }}</b>。服务会短暂重启，运行配置和数据库不会改变。</p>
+        <p v-if="updateError" class="update-dialog-error"><Icon name="alert" :size="14" />{{ updateError }}</p>
+        <div class="dialog-foot">
+          <button class="btn btn-ghost" :disabled="updateApplying" @click="cancelUpdate">取消</button>
+          <button class="btn" :disabled="updateApplying" @click="applySelectedUpdate"><Icon :name="updateApplying ? 'loader' : 'download'" :class="{ spin: updateApplying }" :size="16" />{{ updateApplying ? '准备更新…' : '确认更新' }}</button>
         </div>
       </div>
     </div>

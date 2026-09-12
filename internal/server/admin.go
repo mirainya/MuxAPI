@@ -41,6 +41,7 @@ func (s *Server) registerAdmin(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/settings", admin(s.adminSettings))                // GET/PUT 运行时设置
 	mux.HandleFunc("/admin/backup", admin(s.adminBackup))                    // GET 列表 / POST 触发
 	mux.HandleFunc("/admin/backup/", admin(s.adminBackup))                   // config / schedule / records/{id}
+	mux.HandleFunc("/admin/updates", admin(s.adminUpdates))                  // GET 发行版 / POST 更新
 	mux.HandleFunc("/admin/model-mappings", admin(s.adminModelMappings))     // GET 列表 / POST 新增
 	mux.HandleFunc("/admin/model-mappings/", admin(s.adminModelMappingItem)) // DELETE 删
 }
